@@ -1,0 +1,420 @@
+<!doctype html>
+<!--
+  PROTOTYPE, throwaway. Answers the "Dashboard layout" ticket: how should the page look and read
+  for a trainer seeing it for the first time? Three structurally different variants on one page,
+  switch with ?variant=A|B|C, the bottom bar, or the arrow keys. All numbers are simulated.
+  Chart.js comes from a CDN here only; the real page bundles it. Do not build on this file.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PROTOTYPE · Running dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.js"></script>
+<style>
+:root{--ink:#1c2024;--mute:#667;--line:#e2e4e8;--paper:#fff;--tint:#f5f6f8;--run:#2563a8;--warm:#c8551b;--ok:#2f7d5b}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.5 system-ui,-apple-system,sans-serif;padding-bottom:70px}
+h1,h2,h3{margin:0;line-height:1.2}
+small,.mute{color:var(--mute)}
+.num{font-variant-numeric:tabular-nums}
+.chartbox{position:relative;height:190px}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:7px;overflow:hidden;vertical-align:middle}
+.seg button{all:unset;cursor:pointer;padding:3px 10px;font-size:13px;color:var(--mute)}
+.seg button:focus-visible{outline:2px solid var(--run);outline-offset:-2px}
+.seg button.on{background:var(--ink);color:#fff}
+.tag{font-size:11px;font-weight:600;padding:1px 6px;border-radius:4px;background:var(--tint);color:var(--mute);white-space:nowrap}
+.tag.race{background:#fbe6da;color:var(--warm)}.tag.record{background:#dfeaf6;color:var(--run)}.tag.first{background:#e0f0e8;color:var(--ok)}
+.ach{display:grid;grid-template-columns:82px 1fr;gap:2px 10px;padding:7px 0;border-bottom:1px solid var(--line)}
+.ach time{color:var(--mute);font-size:13px}
+
+/* Variant A: report */
+.A{max-width:760px;margin:0 auto;padding:40px 20px}
+.A header{border-bottom:2px solid var(--ink);padding-bottom:16px;margin-bottom:32px}
+.A h1{font:600 30px/1.2 Georgia,serif}
+.A h2{font:600 22px/1.2 Georgia,serif;margin-bottom:6px}
+.A section{margin-bottom:48px}
+.A .lead{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin:18px 0}
+.A .lead b{display:block;font-size:34px;line-height:1.1;font-weight:600}
+.A .rest{display:grid;grid-template-columns:1fr 1fr;gap:0 28px}
+.A .rest div{display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid var(--line)}
+.A figure{margin:24px 0}.A figcaption{margin-bottom:6px}
+.A summary{cursor:pointer;font-weight:600;padding:8px 0}
+
+/* Variant B: cockpit */
+.B{display:grid;grid-template-columns:230px minmax(0,1fr) 310px;height:calc(100vh - 56px)}
+.B aside{overflow:auto;padding:16px}
+.B .left{background:#14181d;color:#e8eaee}.B .left small{color:#9aa3ad}
+.B .left .seg{border-color:#3a424c}.B .left .seg button{padding:3px 7px;font-size:12px;color:#9aa3ad}.B .left .seg button.on{background:#e8eaee;color:#14181d}
+.B .left dl{margin:14px 0 0}.B .left dt{font-size:12px;color:#9aa3ad;margin-top:10px}.B .left dd{margin:0;font-size:22px;font-weight:600}
+.B main{overflow:auto;padding:14px 16px;background:var(--tint)}
+.B .grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.B .card{background:#fff;border:1px solid var(--line);border-radius:8px;padding:8px 10px}
+.B .card h3{font-size:13px;margin-bottom:4px}.B .chartbox{height:150px}
+.B .top{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;gap:8px;flex-wrap:wrap}
+.B .right{border-left:1px solid var(--line)}
+.B .ach{grid-template-columns:1fr}
+
+/* Variant C: timeline */
+.C{padding:18px 24px;max-width:1280px;margin:0 auto}
+.C .band{display:flex;flex-wrap:wrap;gap:6px 26px;align-items:baseline;padding:12px 0;border-block:1px solid var(--line);margin:12px 0 16px}
+.C .band b{font-size:19px;font-weight:600}.C .band span{white-space:nowrap}
+.C .row{display:grid;grid-template-columns:150px minmax(0,1fr);gap:10px;align-items:center;border-bottom:1px solid var(--line);padding:4px 0}
+.C .row h3{font-size:13px}.C .row small{display:block;font-size:12px;line-height:1.3;font-weight:400}
+.C .chartbox{height:118px}.C .row.tall .chartbox{height:150px}
+.C .pins{position:relative;height:34px;margin-left:52px}
+.C .pin{all:unset;position:absolute;width:9px;height:9px;border-radius:50%;transform:translateX(-50%);cursor:pointer;background:var(--mute)}
+.C .pin:focus-visible{outline:2px solid var(--ink)}
+.C .pin.race{background:var(--warm);top:2px}.C .pin.record{background:var(--run);top:13px}.C .pin.first{background:var(--ok);top:24px}.C .pin.streak{background:#777;top:24px}
+.C .detail{min-height:26px;font-size:14px;padding:3px 0 3px 160px}
+.C .columns{columns:3;column-gap:28px;margin-top:10px}.C .columns .ach{break-inside:avoid}
+
+/* Round 2 shared */
+body[data-v=D],body[data-v=E],body[data-v=F],body[data-v=G]{font-family:ui-rounded,system-ui,sans-serif}
+.D h1,.E h1,.night h1{font-size:30px;font-weight:800}
+.now{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:22px 0 10px}
+.now h2{font-size:21px;font-weight:800}
+.story{font-size:21px;font-weight:800;margin:34px 0 0}
+.big b{display:block;line-height:1.05}.big span{font-weight:600}
+.lvl{display:grid;grid-template-columns:1fr 1fr;gap:0 28px}
+.lvl>div{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--line)}
+
+/* Variant D: tiles */
+body[data-v=D]{background:#fff8ec}
+.D .tiles{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:14px}
+.D .big{padding:16px 18px;border-radius:18px}.D .big b{font-size:clamp(32px,4.4vw,50px);font-weight:800}
+.t1{background:#ff8a6b}.t2{background:#ffcb57}.t3{background:#7cc4ff}.t4{background:#7fdcb3}
+.D .lvl>div{border-color:#eadfc8}
+
+/* Variant E: race bib */
+body[data-v=E]{background:#eef6f0}
+.bibrow{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:28px;align-items:center}
+.bibrow .lvl{grid-template-columns:1fr}
+.bib{position:relative;background:#fff;border:2px solid var(--ink);border-radius:10px;padding:0 26px 16px;transform:rotate(-1.2deg);box-shadow:4px 5px 0 #1f9d7833;overflow:hidden}
+.bib>i{position:absolute;width:12px;height:12px;border-radius:50%;background:#eef6f0;border:2px solid var(--ink);z-index:1}
+.bib>i:nth-child(1){top:44px;left:7px}.bib>i:nth-child(2){top:44px;right:7px}.bib>i:nth-child(3){bottom:7px;left:7px}.bib>i:nth-child(4){bottom:7px;right:7px}
+.bibtop{margin:0 -26px 10px;background:#e8583a;color:#1c2024;font-weight:800;text-transform:uppercase;letter-spacing:.14em;font-size:13px;text-align:center;padding:6px}
+.bibmain{display:flex;align-items:baseline;justify-content:center;gap:10px}
+.bibmain b{font-size:clamp(48px,8vw,84px);font-weight:900;line-height:1}.bibmain span{font-weight:700;color:var(--mute)}
+.bibmain.sub b{font-size:clamp(30px,4.5vw,46px)}
+.bibfoot{display:flex;justify-content:center;gap:22px;margin-top:8px}
+
+/* Variant F: night run */
+.night{background:#1b1464;color:#fff;padding:26px 0 22px}
+.night .inner{max-width:1280px;margin:0 auto;padding:0 24px}
+.night small{color:#b9b4e6}
+.night .seg{border-color:#5b53a8}.night .seg button{color:#c9c5ee}.night .seg button.on{background:#d4ff5a;color:#1b1464}
+.huge{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:6px 0 16px}
+.huge b{font-size:clamp(38px,6.6vw,76px);font-weight:900;font-style:italic;color:#d4ff5a}
+.huge .big:nth-child(even) b{color:#ff8ac4}
+.night .lvl>div{border-color:#3d3590}.night .lvl span{color:#d9d6f3}
+
+/* Variant G: night run 2 */
+.huge5{grid-template-columns:repeat(5,1fr)}
+.huge5 b{font-size:clamp(36px,5.2vw,68px)}
+.huge5 span,.huge5 small{display:block}.huge5 small{font-size:13px}
+.groups{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:18px 24px;margin-top:10px}
+.groups h3{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:8px;min-height:28px;font-size:12px;font-weight:800;letter-spacing:.1em;text-transform:uppercase;color:#d4ff5a}
+.groups .seg button{padding:1px 7px;font-size:11px;letter-spacing:0;text-transform:none}
+.groups .lvl{grid-template-columns:minmax(0,1fr)}.groups .lvl>div{padding:5px 0}
+.race{padding:5px 0}.race b{display:block;font-weight:700}
+.zonebar{display:flex;height:12px;border-radius:6px;overflow:hidden;margin-top:12px}.zonebar+small{display:block;margin-top:3px;font-size:12px}
+.G{--run:#5b3fd6;--warm:#e0257f}
+.G .chartbox{height:230px}.G .row.tall .chartbox{height:310px}
+
+a{color:inherit;text-underline-offset:2px}.ext::after{content:" ↗";font-size:.8em}
+.filters{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:10px 0}
+.filters select,.filters input{font:inherit;font-size:13px;padding:3px 8px;border:1px solid var(--line);border-radius:7px;background:#fff;color:var(--ink)}
+.acts{width:100%;border-collapse:collapse;margin-top:6px;font-size:14px}
+.acts th{text-align:left;font-size:12px;color:var(--mute);border-bottom:2px solid var(--line);padding:5px 8px 5px 0}
+.acts th button{all:unset;cursor:pointer}.acts th button:hover{color:var(--ink)}.acts th button:focus-visible{outline:2px solid var(--run);outline-offset:2px}
+.acts td{padding:6px 8px 6px 0;border-bottom:1px solid var(--line);vertical-align:top}
+.acts td:first-child{white-space:nowrap}.acts .tag{margin-left:3px}
+.more{all:unset;cursor:pointer;margin-top:10px;padding:4px 12px;border:1px solid var(--line);border-radius:7px;font-size:13px}
+.more:focus-visible{outline:2px solid var(--run)}
+
+/* Prototype switcher, not part of any design */
+#switcher{position:fixed;left:50%;bottom:12px;transform:translateX(-50%);display:flex;align-items:center;gap:8px;background:#111;color:#fff;border-radius:99px;padding:6px 10px;font-size:13px;box-shadow:0 4px 18px #0006;z-index:9;white-space:nowrap}
+#switcher button{all:unset;cursor:pointer;padding:2px 9px}
+#switcher small{color:#f5c04a}
+
+@media (max-width:1000px){
+  .B{display:block;height:auto}.B aside,.B main{overflow:visible}
+  .B .grid{grid-template-columns:minmax(0,1fr)}
+  .C .columns{columns:1}.C{padding:14px 16px}
+  .C .row{grid-template-columns:minmax(0,1fr)}.C .detail{padding-left:0}
+}
+@media (max-width:1000px){.groups{grid-template-columns:repeat(2,minmax(0,1fr))}.huge5{grid-template-columns:repeat(3,1fr)}}
+@media (max-width:560px){
+  .acts th:nth-child(n+3):not(:nth-child(4)),.acts td:nth-child(n+3):not(:nth-child(4)){display:none}
+  .groups{grid-template-columns:minmax(0,1fr)}.huge.huge5{grid-template-columns:1fr 1fr}.huge5 .big:last-child{grid-column:span 2}
+  .A .lead{grid-template-columns:1fr 1fr}.A .rest{grid-template-columns:1fr}
+  .D .tiles,.huge{grid-template-columns:1fr 1fr}.lvl,.bibrow{grid-template-columns:minmax(0,1fr)}
+  #switcher small{display:none}
+}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div id="switcher"></div>
+<script>
+// ---------- Fake data: simulated run by run so the records and their volume behave like real ones ----------
+const seeded=s=>()=>{s|=0;s=s+0x6D2B79F5|0;let t=Math.imul(s^s>>>15,1|s);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296};const rng=seeded(2026),rng2=seeded(7);
+const DAY=864e5, iso=d=>new Date(d).toISOString().slice(0,10);
+const START=Date.parse('2022-03-07'), END=Date.parse('2026-10-26'), WATCH='2024-08-23';
+const LAYOFFS=[['2023-07-03','2023-08-21'],['2025-02-03','2025-03-10']];
+const RACES={'2022-11-13':[5,'Fake Harbour 5K'],'2023-04-23':[5,'Fake Spring 5K'],'2023-12-31':[5,'Fake New Year 5K'],'2024-05-19':[10,'Fake Old Town 10K'],'2024-11-10':[10,'Fake Autumn 10K'],'2025-05-18':[10,'Fake Old Town 10K'],'2025-11-09':[10,'Fake Autumn 10K'],'2026-04-19':[12,'Fake Bridges 12K'],'2026-10-11':[10,'Fake Autumn 10K']};
+const fitAt=t=>Math.min(1,(t-START)/(END-START)*1.05);
+function mkRun(date,km,fit,race){
+  const has=d=>km>=d, n=race?0:1;
+  const r={date,type:'run',km:+km.toFixed(1),moving:Math.round(km*(400-fit*60+rng()*30)),race:race||null,
+    best1:Math.round(325-fit*70+n*rng()*25),best5:has(5)?Math.round(1900-fit*380+n*rng()*120):null,best10:has(10)?Math.round(4000-fit*780+n*rng()*240):null,stopped:race?Math.round(rng()*90):0};
+  if(date>=WATCH){const easy=rng()<.4,m=r.moving/60;r.hr=Math.round(166-fit*12+rng()*8-(easy?14:0));
+    r.zones=easy?[.1,.75,.15,0,0].map(z=>z*m):[.05,.2,.4,.3,.05].map(z=>z*m);r.z2=easy}
+  return r}
+const activities=[];
+for(let w=START;w<=END;w+=7*DAY){
+  if(LAYOFFS.some(([a,b])=>iso(w)>=a&&iso(w)<b))continue;
+  const fit=fitAt(w), n=rng()<.12?0:Math.round(.2+fit*1.3+rng()*.8);
+  for(let i=0;i<n;i++){const long=i===n-1;
+    activities.push(mkRun(iso(w+Math.floor(rng()*7)*DAY),long?5+fit*9+rng()*3:3.5+fit*3+rng()*2.5,fit))}
+  if(rng()<.3)activities.push({date:iso(w+2*DAY),type:'strength'});
+}
+for(const[d,[km,name]]of Object.entries(RACES))activities.push(mkRun(d,km+.1,fitAt(Date.parse(d)),name));
+activities.sort((a,b)=>a.date<b.date?-1:1);
+// Fake Strava ids are 16 digits, far above real ones, so links land on a not-found page and never on a stranger's activity.
+const pick=l=>l[Math.floor(rng2()*l.length)],SESS=[['intervals','6x1km'],['fartlek','30/30'],['hills','8x200m'],['zone 2','easy'],['HIIT','tabata'],['running test','12 min']];
+activities.forEach((a,i)=>{
+  const prov=a.date>='2026-10-20'; // provisional: known only from Polar, so no Strava id, title, or session type yet
+  a.id=prov?null:'99'+String(i).padStart(14,'0');
+  if(a.type!=='run'){a.type=pick(['strength','strength','hike','swim']);a.moving=Math.round(1800+rng2()*3600);if(a.type==='hike')a.km=+(5+rng2()*9).toFixed(1);a.title=prov?null:{strength:'Gym session',hike:'Sunday hike',swim:'Pool swim'}[a.type];return}
+  if(a.race){a.title=a.race;return}
+  if(prov)return;
+  const x=rng2(),[session,detail]=a.km>=10&&x<.5?['long run',a.km+' km']:x<.3?pick(SESS):[null];
+  a.session=session;a.title=session?`[${session}] ${detail}`:pick(['Morning run','Evening run','Lunch run'])});
+const runs=activities.filter(a=>a.type==='run');
+
+// Candidate DashboardData shape: { meta, activities, trends: {month, week}, achievements }
+const mondayOf=d=>{const t=Date.parse(d),wd=(new Date(t).getUTCDay()+6)%7;return iso(t-wd*DAY)};
+function trend(key,keys){
+  const m=new Map(keys.map(k=>[k,{key:k,km:0,longest:null,best5:null,best10:null,race5:false,race10:false,zones:[0,0,0,0,0],hrSum:0,hrN:0,effSum:0,z2:[]}]));
+  for(const r of runs){const b=m.get(key(r.date));if(!b)continue;b.km+=r.km;b.longest=Math.max(b.longest||0,r.km);
+    for(const[f,fl]of[['best5','race5'],['best10','race10']])if(r[f]&&(!b[f]||r[f]<b[f])){b[f]=r[f];b[fl]=!!r.race}
+    if(r.hr){r.zones.forEach((z,i)=>b.zones[i]+=z/60);b.hrSum+=r.hr;b.hrN++;b.effSum+=r.km*1000/(r.moving/60)/r.hr;if(r.z2)b.z2.push(r.moving/r.km)}}
+  return[...m.values()]}
+const monthKeys=[],weekKeys=[];
+for(let y=2022,mo=3;`${y}-${String(mo).padStart(2,'0')}`<=iso(END).slice(0,7);mo==12?(y++,mo=1):mo++)monthKeys.push(`${y}-${String(mo).padStart(2,'0')}`);
+for(let w=START;w<=END;w+=7*DAY)weekKeys.push(iso(w));
+const trends={month:trend(d=>d.slice(0,7),monthKeys),week:trend(mondayOf,weekKeys)};
+
+const fmt=s=>{if(s==null)return'–';s=Math.round(s);return`${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`};
+function streaks(mode){ // weeks in a row, oldest first
+  const set=new Set((mode==='runs'?runs:activities).map(a=>mondayOf(a.date)));let cur=0,list=[];
+  for(const k of weekKeys){if(set.has(k)){cur++;list.at(-1)?.open?list.at(-1).len=cur:list.push({len:1,open:true,end:k});list.at(-1).end=k}else{cur=0;if(list.at(-1))list.at(-1).open=false}}
+  return list}
+function achievements(mode){
+  let act=null;const out=[],add=(date,kind,title,detail='')=>out.push({date,kind,title,detail,act});
+  const best={},done=new Set(),barriers={best5:[1800,1650,1500],best10:[3600,3300,3000],best1:[300,270,240]},names={best1:'1K',best5:'5K',best10:'10K'};
+  let longest=0,maxKm=10;
+  runs.forEach((r,i)=>{act=r;
+    if(i===0)add(r.date,'first','First run',`${r.km} km`);
+    if(r.race){if(!done.has('race')){done.add('race');add(r.date,'first','First race')}
+      add(r.date,'race',r.race,`${r.km} km · ${fmt(r.moving)} · stopped ${fmt(r.stopped)}`)}
+    if(r.km>=10&&!done.has('long')){done.add('long');add(r.date,'first','First long run',`${r.km} km`)}
+    while(r.km>=maxKm+1&&Math.floor(r.km)>=11){maxKm++;if(maxKm>=11)add(r.date,'first',`First ${maxKm} km`)}
+    for(const f of['best1','best5','best10'])if(r[f]){
+      if(!best[f]||r[f]<best[f]){if(best[f])add(r.date,'record',`${names[f]} best effort`,`${fmt(r[f])}, was ${fmt(best[f])}`);best[f]=r[f]}
+      for(const b of barriers[f])if(r[f]<b&&!done.has(f+b)){done.add(f+b);add(r.date,'first',`${names[f]} under ${fmt(b)}`,fmt(r[f]))}}
+    if(r.km>longest){if(longest)add(r.date,'record','Longest run',`${r.km} km, was ${longest} km`);longest=r.km}
+  });
+  act=null;
+  for(const[b,label]of[[trends.week,'week'],[trends.month,'month']]){let top=0;
+    for(const x of b)if(x.km>top&&x.km>0){if(top)add(x.key.length===7?x.key+'-28':x.key,'record',`Record ${label}`,`${x.km.toFixed(1)} km, was ${top.toFixed(1)} km`);top=x.km}}
+  // shortcut: one row per record-breaking streak, not per week; "each time it's beaten" would add a row every week of a streak
+  let top=0;for(const s of streaks(mode))if(s.len>top){top=s.len;add(s.end,'streak',`Longest streak: ${s.len} weeks`,mode==='runs'?'runs only':'any activity')}
+  return out.sort((a,b)=>a.date<b.date?1:-1)}
+
+function stats(period,mode){
+  const end=Date.parse(activities.at(-1).date),days={'3w':21,'8w':56,'3m':91,'1y':365,all:(end-START)/DAY}[period];
+  const from=iso(end-days*DAY),inP=activities.filter(a=>a.date>from),rs=inP.filter(a=>a.type==='run'),wk=days/7;
+  const min=f=>{const v=rs.map(r=>r[f]).filter(Boolean);return v.length?Math.min(...v):null};
+  const last=streaks(mode).at(-1);
+  const total=rs.reduce((s,r)=>s+r.km,0),hrRuns=rs.filter(r=>r.hr),avg=f=>hrRuns.length?hrRuns.reduce((s,r)=>s+f(r),0)/hrRuns.length:null;
+  const z2=rs.filter(r=>r.z2),zones=[0,1,2,3,4].map(i=>hrRuns.reduce((s,r)=>s+r.zones[i],0)),zt=zones.reduce((a,b)=>a+b,0)||1;
+  const races=runs.filter(r=>r.race),fastest=(l,f)=>l.reduce((a,r)=>!a||f(r)<f(a)?r:a,null);
+  const prevKm=runs.filter(r=>r.date>iso(end-2*days*DAY)&&r.date<=from).reduce((s,r)=>s+r.km,0),allBest=f=>Math.min(...runs.map(r=>r[f]).filter(Boolean)),secs=rs.reduce((s,r)=>s+r.moving,0);
+  const more={b1:fmt(min('best1')),all1:fmt(allBest('best1')),all5:fmt(allBest('best5')),all10:fmt(allBest('best10')),allLong:Math.max(...runs.map(r=>r.km)),runs:rs.length,
+    total:total.toFixed(0),time:`${Math.floor(secs/3600)} h ${String(Math.floor(secs%3600/60)).padStart(2,'0')}`,delta:period!=='all'&&prevKm?Math.round((total-prevKm)/prevKm*100):null,
+    maxStreak:Math.max(...streaks(mode).map(x=>x.len)),longWeeks:new Set(rs.filter(r=>r.km>=10).map(r=>mondayOf(r.date))).size,weeks:Math.round(wk),
+    hr:hrRuns.length?Math.round(avg(r=>r.hr)):null,eff:hrRuns.length?avg(r=>r.km*1000/(r.moving/60)/r.hr).toFixed(2):null,z2:z2.length?fmt(z2.reduce((a,r)=>a+r.moving/r.km,0)/z2.length):null,zones:zones.map(z=>z/zt*100),
+    // shortcut: "10K race" means 9.9 to 10.5 km and fastest race means best pace, confirm both before the real rules
+    fastRace:fastest(races,r=>r.moving/r.km),fast10:fastest(races.filter(r=>r.km>=9.9&&r.km<=10.5),r=>r.moving),longRun:rs.reduce((a,r)=>!a||r.km>a.km?r:a,null)};
+  return{...more,weekly:(total/wk).toFixed(1),perWeek:(rs.length/wk).toFixed(1),longest:Math.max(0,...rs.map(r=>r.km)),longRuns:rs.filter(r=>r.km>=10).length,
+    b5:fmt(min('best5')),b10:fmt(min('best10')),cross:((inP.length-rs.length)/wk).toFixed(1),streak:last?.open?last.len:0}}
+
+// ---------- Charts ----------
+Chart.defaults.animation=false;Chart.defaults.font.size=11;Chart.defaults.maintainAspectRatio=false;
+Chart.register({id:'era',beforeDraw(c,_,o){if(o.idx==null)return;const{ctx,chartArea:{left,top,bottom}}=c,x=c.scales.x.getPixelForValue(o.idx);
+  ctx.save();ctx.fillStyle='#0000000a';ctx.fillRect(left,top,x-left,bottom-top);ctx.fillStyle='#889';ctx.fillText(o.label||'',left+5,top+11);ctx.restore()}});
+Chart.register({id:'endLabel',afterDatasetsDraw(c){c.data.datasets.forEach((d,i)=>{if(!d.endLabel)return;const p=c.getDatasetMeta(i).data.at(-1),{ctx}=c;
+  ctx.save();ctx.fillStyle=d.borderColor;ctx.font='600 11px system-ui';ctx.textAlign='right';ctx.fillText(d.endLabel,p.x,p.y-5);ctx.restore()})}});
+const COL={run:'#2563a8',warm:'#c8551b'};
+const ZONES=['#cfd8e3','#8fc1a9','#efcf6b','#e8964e','#c8421f'];
+const CHARTS={
+  dist:{title:'Run distance',unit:'km per period',build:t=>({type:'bar',datasets:[{label:'km',data:t.map(b=>+b.km.toFixed(1)),backgroundColor:COL.run}]})},
+  longest:{title:'Longest run',unit:'km, line at half-marathon distance',build:t=>({type:'bar',datasets:[{label:'Longest km',data:t.map(b=>b.longest),backgroundColor:COL.run},
+    {type:'line',label:'21.1 km',endLabel:'21.1 km',data:t.map(()=>21.1),borderColor:COL.warm,borderDash:[5,4],borderWidth:1.5,pointRadius:0}]})},
+  best:{title:'Best 5K and 10K efforts',unit:'up is faster, triangles are races',axis:'time',legend:true,build:t=>({type:'line',datasets:[['5K','best5','race5',COL.run],['10K','best10','race10',COL.warm]].map(([label,f,fl,c])=>(
+    {label,data:t.map(b=>b[f]),borderColor:c,backgroundColor:c,borderWidth:1.5,spanGaps:true,pointStyle:t.map(b=>b[fl]?'triangle':'circle'),pointRadius:t.map(b=>b[fl]?6:1.5)}))})},
+  zones:{hr:true,title:'Time in zones',unit:'hours per period',stacked:true,build:t=>({type:'bar',datasets:ZONES.map((c,i)=>({label:'Z'+(i+1),data:t.map(b=>b.hrN?+b.zones[i].toFixed(1):null),backgroundColor:c}))})},
+  eff:{hr:true,title:'Efficiency',unit:'metres per heartbeat, up is better',build:t=>({type:'line',datasets:[{label:'m/beat',data:t.map(b=>b.hrN?+(b.effSum/b.hrN).toFixed(2):null),borderColor:'#2f7d5b',borderWidth:1.5,pointRadius:1.5}]})},
+  z2:{hr:true,title:'Zone 2 pace',unit:'min/km, up is faster',axis:'time',build:t=>({type:'line',datasets:[{label:'min/km',data:t.map(b=>b.z2.length?Math.round(b.z2.reduce((a,c)=>a+c)/b.z2.length):null),borderColor:'#2f7d5b',borderWidth:1.5,pointRadius:1.5}]})},
+  hr:{hr:true,title:'Average heart rate',unit:'bpm',build:t=>({type:'line',datasets:[{label:'bpm',data:t.map(b=>b.hrN?Math.round(b.hrSum/b.hrN):null),borderColor:'#c8421f',borderWidth:1.5,pointRadius:1.5}]})},
+};
+let live=[];
+function draw(root,{aligned=false,hideX=false}={}){
+  root.querySelectorAll('canvas[data-chart]').forEach(cv=>{
+    const def=CHARTS[cv.dataset.chart],all=trends[S.bucket],firstHr=all.findIndex(b=>b.hrN),t=def.hr&&!aligned?all.slice(firstHr):all;
+    const{type,datasets}=def.build(t),time=def.axis==='time';
+    live.push(new Chart(cv,{type,data:{labels:t.map(b=>b.key),datasets},options:{
+      interaction:{mode:'index',intersect:false},
+      plugins:{legend:{display:!!def.legend||!!def.stacked,position:'top',align:'end',labels:{boxWidth:9,boxHeight:9,padding:6}},
+        tooltip:{callbacks:time?{label:c=>`${c.dataset.label}: ${fmt(c.raw)}`}:{}},
+        era:{idx:aligned||!def.hr?all.findIndex(b=>b.key>=WATCH.slice(0,7)):null,label:aligned?'':'phone era, no HR'}},
+      scales:{x:{stacked:!!def.stacked,grid:{display:false},ticks:{display:!(aligned&&hideX),maxTicksLimit:9,maxRotation:0,callback(v){return this.getLabelForValue(v).slice(0,7)}}},
+        y:{stacked:!!def.stacked,reverse:time,grid:{color:'#eee'},ticks:{maxTicksLimit:4,callback:time?fmt:undefined},beginAtZero:!time&&def.chart!=='hr'&&cv.dataset.chart!=='hr'&&cv.dataset.chart!=='eff',
+          ...(aligned?{afterFit:s=>{s.width=52}}:{})}}}}))})}
+
+// ---------- Shared bits ----------
+const S={variant:new URLSearchParams(location.search).get('variant')||'G',period:'8w',bucket:'month',streak:'runs',filter:'all',pin:null,achOpen:false,type:'all',mark:'all',session:'all',year:'all',q:'',limit:40,sort:'date',dir:'desc'};
+const seg=(name,opts)=>`<span class="seg" role="group" aria-label="${name}">${opts.map(([v,l])=>`<button data-set="${name}:${v}" class="${S[name]===v?'on':''}" aria-pressed="${S[name]===v}">${l}</button>`).join('')}</span>`;
+const PERIOD=()=>seg('period',[['3w','3 wk'],['8w','8 wk'],['3m','3 mo'],['1y','1 yr'],['all','All']]);
+const BUCKET=()=>seg('bucket',[['month','Monthly'],['week','Weekly']]);
+const STREAK=()=>seg('streak',[['runs','Runs'],['any','Any activity']]);
+const link=(a,t)=>a?.id?`<a class="ext" href="https://www.strava.com/activities/${a.id}" target="_blank" rel="noopener">${t}</a>`:t;
+const achRow=a=>`<div class="ach"><time class="num">${a.date}</time><div><b style="font-weight:600">${link(a.act,a.title)}</b> <span class="tag ${a.kind}">${a.kind}</span>${a.detail?`<div class="mute num" style="font-size:13px">${a.detail}</div>`:''}</div></div>`;
+const canvas=id=>`<div class="chartbox"><canvas data-chart="${id}" role="img" aria-label="${CHARTS[id].title}, ${CHARTS[id].unit}"></canvas></div>`;
+const META=`${runs.length} runs and ${activities.length-runs.length} other sessions, ${activities[0].date} to ${activities.at(-1).date}`;
+
+// ---------- Variant A: a report you read top to bottom ----------
+function VariantA(){
+  const s=stats(S.period,S.streak),A=achievements(S.streak),years=[...new Set(A.map(a=>a.date.slice(0,4)))];
+  const fig=id=>`<figure><figcaption><b>${CHARTS[id].title}</b> <small>${CHARTS[id].unit}</small></figcaption>${canvas(id)}</figure>`;
+  return`<div class="A"><header><h1>Half-marathon readiness: the evidence</h1><small>${META}. Heart rate since ${WATCH}. This page shows evidence only: no verdict, no predicted time.</small></header>
+  <section><h2>1. Current level</h2><small>Showing the last</small> ${PERIOD()}
+    <div class="lead"><div><b class="num">${s.weekly} km</b><small>weekly distance</small></div><div><b class="num">${s.longest} km</b><small>longest run</small></div><div><b class="num">${s.b10}</b><small>best 10K effort</small></div></div>
+    <div class="rest num"><div><span>Runs per week</span><b>${s.perWeek}</b></div><div><span>Long runs (10 km+)</span><b>${s.longRuns}</b></div><div><span>Best 5K effort</span><b>${s.b5}</b></div><div><span>Cross-training per week</span><b>${s.cross}</b></div><div><span>Current streak ${STREAK()}</span><b>${s.streak} wk</b></div></div>
+  </section>
+  <section><h2>2. Trajectory</h2><small>Full history.</small> ${BUCKET()}${fig('dist')}${fig('longest')}${fig('best')}
+    <h3>Heart rate</h3><small>Watch era only, zones from settings.</small>${fig('zones')}${fig('eff')}${fig('z2')}${fig('hr')}</section>
+  <section><h2>3. Achievements</h2><small>All time, newest first. ${A.length} entries.</small>
+    ${years.map((y,i)=>`<details ${i==0?'open':''}><summary>${y} (${A.filter(a=>a.date.startsWith(y)).length})</summary>${A.filter(a=>a.date.startsWith(y)).map(achRow).join('')}</details>`).join('')}</section></div>`}
+
+// ---------- Variant B: a one-screen cockpit, nothing scrolls away ----------
+function VariantB(){
+  const s=stats(S.period,S.streak),A=achievements(S.streak).filter(a=>S.filter==='all'||a.kind===S.filter);
+  const st=[['Weekly distance',s.weekly+' km'],['Runs per week',s.perWeek],['Longest run',s.longest+' km'],['Long runs (10 km+)',s.longRuns],['Best 5K effort',s.b5],['Best 10K effort',s.b10],['Cross-training / wk',s.cross],['Current streak',s.streak+' wk']];
+  return`<div class="B"><aside class="left"><h2 style="font-size:15px">Current level</h2><small>${activities.at(-1).date}</small><div style="margin-top:8px">${PERIOD()}</div>
+    <dl class="num">${st.map(([k,v])=>`<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl><div style="margin-top:10px">${STREAK()}</div></aside>
+  <main><div class="top"><div><h1 style="font-size:17px">Trajectory</h1><small>${META}</small></div>${BUCKET()}</div>
+    <div class="grid">${Object.entries(CHARTS).map(([id,c])=>`<div class="card"><h3>${c.title} <small style="font-weight:400">${c.unit}</small></h3>${canvas(id)}</div>`).join('')}</div></main>
+  <aside class="right"><h2 style="font-size:15px;margin-bottom:6px">Achievements</h2>${seg('filter',[['all','All'],['record','Records'],['race','Races'],['first','Firsts']])}<div style="margin-top:6px">${A.map(achRow).join('')}</div></aside></div>`}
+
+// ---------- Variant C: one shared time axis, achievements pinned where they happened ----------
+function VariantC(){
+  const s=stats(S.period,S.streak);
+  return`<div class="C"><h1 style="font-size:20px">Running record, 2022 to now</h1><small>${META}. Shaded area: phone era, no heart rate.</small>
+  <div class="band num"><span>${PERIOD()}</span><span><b>${s.weekly} km</b> /wk</span><span><b>${s.perWeek}</b> runs /wk</span><span><b>${s.longest} km</b> longest</span><span><b>${s.longRuns}</b> long runs</span><span><b>${s.b5}</b> 5K</span><span><b>${s.b10}</b> 10K</span><span><b>${s.cross}</b> cross /wk</span><span><b>${s.streak} wk</b> streak ${STREAK()}</span></div>
+  ${trajectory()}</div>`}
+function trajectory(){
+  const A=achievements(S.streak).filter(a=>S.filter==='all'||a.kind===S.filter),keys=trends[S.bucket].map(b=>b.key);
+  const idx=d=>{const k=S.bucket==='month'?d.slice(0,7):mondayOf(d);return Math.max(0,keys.indexOf(k))};
+  const row=(id,tall)=>`<div class="row ${tall?'tall':''}"><h3>${CHARTS[id].title}<small>${CHARTS[id].unit}</small></h3>${canvas(id)}</div>`;
+  const shown=S.pin!=null?A[S.pin]:null;
+  return`<div class="filters" style="justify-content:space-between">${seg('filter',[['all','All achievements'],['record','Records'],['race','Races'],['first','Firsts'],['streak','Streaks']])}${BUCKET()}</div>
+  <div class="row"><h3>Achievements<small><span style="color:var(--warm)">●</span> race <span style="color:var(--run)">●</span> record <span style="color:var(--ok)">●</span> first</small></h3><div class="pins">${A.map((a,i)=>`<button class="pin ${a.kind}" data-set="pin:${i}" style="left:${(idx(a.date)+.5)/keys.length*100}%" title="${a.date} ${a.title}" aria-label="${a.date} ${a.title}"></button>`).join('')}</div></div>
+  <div class="detail">${shown?`<b style="font-weight:600">${shown.date}: ${link(shown.act,shown.title)}</b> <span class="mute">${shown.detail}</span>`:'<span class="mute">Select a dot to see the achievement.</span>'}</div>
+  ${row('dist')}${row('longest',1)}${row('best',1)}${row('zones')}${row('eff')}${row('z2')}${row('hr')}
+  <details style="margin-top:18px" ${S.achOpen?'open':''} ontoggle="S.achOpen=this.open"><summary style="cursor:pointer;font-weight:600">All ${A.length} achievements</summary><div class="columns">${A.map(achRow).join('')}</div></details>`}
+
+// ---------- Round 2: A's level table + B's big numbers, less serious, on C's charts ----------
+const levelTable=s=>`<div class="lvl num"><div><span>Weekly distance</span><b>${s.weekly} km</b></div><div><span>Runs per week</span><b>${s.perWeek}</b></div><div><span>Cross-training per week</span><b>${s.cross}</b></div><div><span>Current streak ${STREAK()}</span><b>${s.streak} wk</b></div></div>`;
+const STORY=`<h2 class="story">The story so far</h2><small>Grey area: phone era, no heart rate.</small>`;
+const big=(v,l,c='')=>`<div class="big ${c}"><b class="num">${v}</b><span>${l}</span></div>`;
+
+function VariantD(){ // colour tiles, table underneath
+  const s=stats(S.period,S.streak);
+  return`<div class="C D"><h1>Adri's running</h1><small>${META}</small>
+  <div class="now"><h2>Right now</h2>${PERIOD()}</div>
+  <div class="tiles">${big(s.b5,'best 5K','t1')}${big(s.b10,'best 10K','t2')}${big(s.longest+' km','longest run','t3')}${big(s.longRuns,'long runs, 10 km+','t4')}</div>
+  ${levelTable(s)}${STORY}${trajectory()}</div>`}
+
+function VariantE(){ // a race bib beside the table
+  const s=stats(S.period,S.streak);
+  return`<div class="C E"><h1>Adri's running</h1><small>${META}</small>
+  <div class="now"><h2>Right now</h2>${PERIOD()}</div>
+  <div class="bibrow"><div class="bib"><i></i><i></i><i></i><i></i><div class="bibtop">Best efforts</div>
+      <div class="bibmain num"><span>10K</span><b>${s.b10}</b></div><div class="bibmain sub num"><span>5K</span><b>${s.b5}</b></div>
+      <div class="bibfoot num"><span><b>${s.longest} km</b> longest</span><span><b>${s.longRuns}</b> long runs</span></div></div>
+    ${levelTable(s)}</div>${STORY}${trajectory()}</div>`}
+
+function VariantF(){ // big night-run banner
+  const s=stats(S.period,S.streak);
+  return`<div class="night"><div class="inner"><h1>Adri's running</h1><small>${META}</small>
+    <div class="now"><h2>Right now</h2>${PERIOD()}</div>
+    <div class="huge">${big(s.b5,'best 5K')}${big(s.b10,'best 10K')}${big(s.longest,'km longest run')}${big(s.longRuns,'long runs')}</div>
+    ${levelTable(s)}</div></div><div class="C F">${STORY}${trajectory()}</div>`}
+
+// ---------- Round 3: F evolved, fuller header, taller charts ----------
+function VariantG(){
+  const s=stats(S.period,S.streak),sign=s.delta>0?'+':'';
+  const card=(h,r)=>`<div><h3>${h}</h3><div class="race"><b>${link(r,r.title||'Run, from Polar')}</b><small>${r.date}</small></div>${rows([['Distance',r.km+' km'],['Time',fmt(r.moving)],['Pace',fmt(r.moving/r.km)+' /km'],['Time stopped',fmt(r.stopped)]])}</div>`;
+  const best=(v,all)=>v===all?'also the all-time best':`all-time ${all}`;
+  const rows=l=>`<div class="lvl num">${l.map(([k,v])=>`<div><span>${k}</span><b>${v}</b></div>`).join('')}</div>`;
+  const hugeG=(v,l,sub)=>`<div class="big"><b class="num">${v}</b><span>${l}</span><small>${sub}</small></div>`;
+  return`<div class="night"><div class="inner"><h1>Adri's running</h1><small>${META}</small>
+    <div class="now"><h2>Right now</h2>${PERIOD()}</div>
+    <div class="huge huge5">${hugeG(s.b5,'best 5K',best(s.b5,s.all5))}${hugeG(s.b10,'best 10K',best(s.b10,s.all10))}${hugeG(s.b1,'best 1K',best(s.b1,s.all1))}${hugeG(s.longest,'km longest run',s.longest===s.allLong?'also the all-time longest':`all-time ${s.allLong} km`)}${hugeG(s.longRuns,'long runs',`in ${s.longWeeks} of ${s.weeks} weeks`)}</div>
+    <div class="groups">
+      <div><h3>Volume</h3>${rows([['Weekly distance',s.weekly+' km'],['vs previous period',s.delta==null?'–':`${sign}${s.delta}%`],['Total distance',s.total+' km'],['Time running',s.time],['Runs per week',s.perWeek],['Cross-training per week',s.cross]])}</div>
+      <div><h3>Consistency ${STREAK()}</h3>${rows([['Current streak',s.streak+' wk'],['Longest streak ever',s.maxStreak+' wk'],['Runs in period',s.runs],['Weeks with a long run',`${s.longWeeks} of ${s.weeks}`]])}</div>
+      ${card('Fastest race',s.fastRace)}${card('Fastest 10K race',s.fast10)}${card('Longest run',s.longRun)}
+    </div></div></div><div class="C F G">${STORY}${trajectory()}${activitySection()}</div>`}
+const COLS=[{key:'date',label:'Date',get:a=>a.date},{key:'title',label:'Activity',get:a=>a.title?.toLowerCase(),asc:1},{key:'type',label:'Type',get:a=>a.type,asc:1},{key:'km',label:'Distance',get:a=>a.km},{key:'time',label:'Time',get:a=>a.moving},{key:'pace',label:'Pace',get:a=>a.type==='run'?a.moving/a.km:null,asc:1},{key:'hr',label:'HR',get:a=>a.hr}];
+function actList(){const q=S.q.toLowerCase();return activities.filter(a=>(S.type==='all'||a.type===S.type)&&(S.mark==='all'||(S.mark==='race'?a.race:a.type==='run'&&a.km>=10))&&(S.session==='all'||a.session===S.session)&&(S.year==='all'||a.date.startsWith(S.year))&&(!q||(a.title||'').toLowerCase().includes(q))).reverse()}
+function actTable(){
+  const{get}=COLS.find(c=>c.key===S.sort),sign=S.dir==='asc'?1:-1,gone=v=>v==null||v==='';
+  // empty values stay last in both directions
+  const l=actList().sort((x,y)=>{const a=get(x),b=get(y);return gone(a)||gone(b)?gone(a)-gone(b):a<b?-sign:a>b?sign:0}),tag=(c,t)=>`<span class="tag ${c}">${t}</span>`;
+  const row=a=>`<tr><td class="num">${a.date}</td><td>${link(a,a.title||(a.type==='run'?'Run':a.type)+', from Polar')} ${a.race?tag('race','race'):''}${a.type==='run'&&a.km>=10?tag('','long run'):''}${a.id?'':tag('','not on Strava yet')}</td><td>${a.type}</td><td class="num">${a.km?a.km+' km':'–'}</td><td class="num">${fmt(a.moving)}</td><td class="num">${a.type==='run'?fmt(a.moving/a.km):'–'}</td><td class="num">${a.hr||'–'}</td></tr>`;
+  return`<small>Showing ${Math.min(S.limit,l.length)} of ${l.length} activities</small><table class="acts"><thead><tr>${COLS.map(c=>{const on=c.key===S.sort,asc=S.dir==='asc';return`<th aria-sort="${on?(asc?'ascending':'descending'):'none'}"><button data-sort="${c.key}">${c.label}${on?(asc?' ▲':' ▼'):''}</button></th>`}).join('')}</tr></thead><tbody>${l.slice(0,S.limit).map(row).join('')}</tbody></table>${l.length>S.limit?`<button class="more" data-set="limit:${S.limit+40}">Show more</button>`:''}`}
+function activitySection(){
+  const opt=(name,label,vals)=>`<select data-filter="${name}" aria-label="${label}"><option value="all">${label}</option>${vals.map(v=>`<option ${S[name]===v?'selected':''}>${v}</option>`).join('')}</select>`;
+  return`<h2 class="story">All activities</h2><div class="filters">${seg('type',[['all','All'],...[...new Set(activities.map(a=>a.type))].map(t=>[t,t[0].toUpperCase()+t.slice(1)])])}${seg('mark',[['all','Any'],['race','Races'],['long','Long runs']])}
+    ${opt('session','Any session type',[...new Set(activities.map(a=>a.session).filter(Boolean))])}${opt('year','Any year',[...new Set(activities.map(a=>a.date.slice(0,4)))].reverse())}<input id="q" type="search" placeholder="Search titles" aria-label="Search titles" value="${S.q}"></div><div id="acttable">${actTable()}</div>`}
+
+// ---------- Prototype switcher ----------
+const V={G:['Night run 2',VariantG],D:['Tiles',VariantD],E:['Race bib',VariantE],F:['Night run',VariantF],A:['Report',VariantA],B:['Cockpit',VariantB],C:['Timeline',VariantC]},KEYS=Object.keys(V);
+const THEMES={G:{run:'#5b3fd6',warm:'#e0257f'},D:{run:'#e8583a',warm:'#2a7fd6'},E:{run:'#1f9d78',warm:'#e8583a'},F:{run:'#5b3fd6',warm:'#e0257f'}};
+function render(){
+  if(!V[S.variant])S.variant='G';
+  const y=scrollY;live.forEach(c=>c.destroy());live=[];
+  Object.assign(COL,{run:'#2563a8',warm:'#c8551b'},THEMES[S.variant]);document.body.dataset.v=S.variant;
+  const app=document.getElementById('app');app.innerHTML=V[S.variant][1]();
+  draw(app,'CDEFG'.includes(S.variant)?{aligned:true}:{});scrollTo(0,y);
+  document.title=`PROTOTYPE ${S.variant} · ${V[S.variant][0]}`;
+  document.getElementById('switcher').innerHTML=`<button data-go="-1" aria-label="Previous variant">←</button><b>${S.variant} (${V[S.variant][0]})</b><button data-go="1" aria-label="Next variant">→</button><small>fake data · ${S.period} · ${S.bucket} · ${S.streak}</small>`}
+function go(d){S.variant=KEYS[(KEYS.indexOf(S.variant)+d+KEYS.length)%KEYS.length];S.pin=null;try{history.replaceState(null,'','?variant='+S.variant)}catch{}render()}
+document.addEventListener('click',e=>{const b=e.target.closest('[data-set],[data-go]');if(!b)return;
+  if(b.dataset.go)return go(+b.dataset.go);
+  const[k,v]=b.dataset.set.split(':');S[k]=k==='pin'||k==='limit'?+v:v;if(k==='filter')S.pin=null;if(k==='type'||k==='mark')S.limit=40;render()});
+document.addEventListener('click',e=>{const k=e.target.closest('[data-sort]')?.dataset.sort;if(!k)return;
+  S.dir=S.sort===k?(S.dir==='asc'?'desc':'asc'):COLS.find(c=>c.key===k).asc?'asc':'desc';S.sort=k;S.limit=40; // first click: fastest pace, A to Z, otherwise highest or newest
+  document.getElementById('acttable').innerHTML=actTable();document.querySelector(`[data-sort=${k}]`).focus()});
+document.addEventListener('change',e=>{const k=e.target.dataset.filter;if(k){S[k]=e.target.value;S.limit=40;render()}});
+document.addEventListener('input',e=>{if(e.target.id==='q'){S.q=e.target.value;S.limit=40;document.getElementById('acttable').innerHTML=actTable()}});
+document.addEventListener('keydown',e=>{if(e.target.matches('input,select,textarea'))return;if(e.key==='ArrowLeft'){e.preventDefault();go(-1)}if(e.key==='ArrowRight'){e.preventDefault();go(1)}});
+render();
+</script>
+</body>
+</html>
