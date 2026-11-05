@@ -1,0 +1,5 @@
+.env
+data/
+*.sqlite
+*.db
+dist/
