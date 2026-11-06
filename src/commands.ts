@@ -1,3 +1,4 @@
+import { deriveStale } from "./derive";
 import { writeDashboard } from "./generate";
 import { readBulkExport } from "./import";
 import { buildDashboardData, type DashboardData } from "./metrics";
@@ -23,6 +24,7 @@ async function statusOf(run: () => Promise<DashboardData>): Promise<Status> {
 }
 
 async function publish(store: Store, settings: Settings, deps: Deps): Promise<DashboardData> {
+  deriveStale(store, deps.log);
   const data = buildDashboardData(store.activities(), settings, deps.now());
   await writeDashboard(data, deps.outPath);
   return data;

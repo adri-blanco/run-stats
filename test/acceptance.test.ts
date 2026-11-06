@@ -23,5 +23,6 @@ test.skipIf(!existsSync(ZIP))("imports the real Bulk export", async () => {
   if (!status.ok) throw new Error(status.error);
   expect(status.data.activities).toHaveLength(289);
   expect(status.data.activities.filter((a) => a.type === "run")).toHaveLength(200);
+  expect(status.data.activities.filter((a) => a.avgHr !== null)).toHaveLength(192);
   expect(lines).toEqual(["Imported 289 activities and 289 files"]);
 });

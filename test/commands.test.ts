@@ -1,5 +1,7 @@
+import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { gzipSync, zipSync } from "fflate";
+import { Encoder, Profile } from "@garmin/fitsdk";
+import { gunzipSync, gzipSync, zipSync } from "fflate";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -33,6 +35,41 @@ function exportZip(rows: Row[], files: Record<string, Uint8Array> = {}): Uint8Ar
   const header = Array(COLUMNS).fill("Distancia").join(",");
   const csv = [header, ...rows.map(csvRow)].join("\n");
   return zipSync({ "activities.csv": new TextEncoder().encode(csv), ...files });
+}
+
+type Point = { at: number; bpm?: number };
+
+const START = Date.UTC(2026, 10, 4, 18);
+const isoAt = (seconds: number) => new Date(START + seconds * 1000).toISOString();
+const hrTag = (bpm?: number) => (bpm === undefined ? "" : `<HeartRateBpm><Value>${bpm}</Value></HeartRateBpm>`);
+
+function tcx(points: Point[]): Uint8Array {
+  const trackpoints = points.map((p) => `<Trackpoint><Time>${isoAt(p.at)}</Time>${hrTag(p.bpm)}</Trackpoint>`);
+  return gzipSync(
+    new TextEncoder().encode(
+      `<?xml version="1.0"?><TrainingCenterDatabase><Activities><Activity Sport="Running"><Lap><Track>${trackpoints.join("")}</Track></Lap></Activity></Activities></TrainingCenterDatabase>`,
+    ),
+  );
+}
+
+function gpx(points: Point[]): Uint8Array {
+  const hr = (bpm?: number) =>
+    bpm === undefined
+      ? ""
+      : `<extensions><gpxtpx:TrackPointExtension><gpxtpx:hr>${bpm}</gpxtpx:hr></gpxtpx:TrackPointExtension></extensions>`;
+  const trackpoints = points.map((p) => `<trkpt lat="42.9" lon="-8.3"><time>${isoAt(p.at)}</time>${hr(p.bpm)}</trkpt>`);
+  return new TextEncoder().encode(
+    `<?xml version="1.0"?><gpx xmlns:gpxtpx="http://www.garmin.com/xmlschemas/TrackPointExtension/v1"><trk><trkseg>${trackpoints.join("")}</trkseg></trk></gpx>`,
+  );
+}
+
+function fit(points: Point[]): Uint8Array {
+  const encoder = new Encoder();
+  encoder.writeMesg({ mesgNum: Profile.MesgNum.FILE_ID!, type: "activity", manufacturer: "garmin", product: 1, timeCreated: new Date(START) } as any);
+  for (const p of points) {
+    encoder.writeMesg({ mesgNum: Profile.MesgNum.RECORD!, timestamp: new Date(START + p.at * 1000), heartRate: p.bpm } as any);
+  }
+  return gzipSync(encoder.close());
 }
 
 let dir: string;
@@ -72,7 +109,15 @@ describe("importExport", () => {
   test("stores an activity from a Bulk export and returns it in the DashboardData", async () => {
     const data = await imported([{ title: "Correr por correr" }]);
     expect(data.activities).toEqual([
-      { date: "2026-11-04", title: "Correr por correr", type: "run", distanceM: 6062.6, movingS: 2515 },
+      {
+        date: "2026-11-04",
+        title: "Correr por correr",
+        type: "run",
+        distanceM: 6062.6,
+        movingS: 2515,
+        avgHr: null,
+        maxHr: null,
+      },
     ]);
   });
 
@@ -172,6 +217,66 @@ describe("importExport", () => {
   });
 });
 
+describe("heart rate from activity files", () => {
+  const importedFile = async (name: string, bytes: Uint8Array) =>
+    (await imported([{ file: name }], { [name]: bytes })).activities[0]!;
+
+  test("each sample counts until the next, capped at 10 s, and average and max come from that", async () => {
+    const points = [{ at: 0, bpm: 100 }, { at: 4, bpm: 120 }, { at: 34, bpm: 140 }, { at: 35, bpm: 140 }];
+    // 100 for 4 s, 120 for a capped 10 s, 140 for 1 s; the last sample has no next.
+    expect(await importedFile("activities/1.tcx.gz", tcx(points))).toMatchObject({ avgHr: 116, maxHr: 140 });
+  });
+
+  test.each([
+    ["GPX", "activities/1.gpx", gpx],
+    ["FIT", "activities/1.fit.gz", fit],
+  ])("reads heart rate from a %s file", async (_, name, encode) => {
+    const points = [{ at: 0, bpm: 100 }, { at: 4, bpm: 120 }, { at: 34, bpm: 140 }, { at: 35, bpm: 140 }];
+    expect(await importedFile(name, encode(points))).toMatchObject({ avgHr: 116, maxHr: 140 });
+    expect(lines.join("\n")).not.toContain("Warning");
+  });
+
+  test("samples with no heart rate or a zero reading count for nothing", async () => {
+    const points = [{ at: 0, bpm: 100 }, { at: 1 }, { at: 2, bpm: 0 }, { at: 3, bpm: 130 }, { at: 5, bpm: 130 }];
+    expect(await importedFile("activities/1.tcx.gz", tcx(points))).toMatchObject({ avgHr: 112, maxHr: 130 });
+  });
+
+  test("a file with no heart rate leaves average and max empty, with no warning", async () => {
+    const activity = await importedFile("activities/1.tcx.gz", tcx([{ at: 0 }, { at: 1 }]));
+    expect(activity).toMatchObject({ avgHr: null, maxHr: null });
+    expect(lines.join("\n")).not.toContain("Warning");
+  });
+});
+
+describe("a corrupt activity file", () => {
+  const good = tcx([{ at: 0, bpm: 100 }, { at: 2, bpm: 100 }]);
+
+  test.each([
+    ["TCX cut short", "activities/1.tcx.gz", gzipSync(gunzipSync(good).slice(0, 100))],
+    ["bytes that aren't gzip", "activities/1.tcx.gz", new Uint8Array([1, 2, 3])],
+    ["the wrong kind of XML", "activities/1.tcx.gz", gzipSync(new TextEncoder().encode("<gpx/>"))],
+    ["GPX that isn't XML", "activities/1.gpx", new TextEncoder().encode("<gpx><trk>")],
+    ["FIT that isn't FIT", "activities/1.fit.gz", gzipSync(new Uint8Array([1, 2, 3]))],
+  ])("%s keeps the summary and file, warns, and has empty derived values", async (_, name, bytes) => {
+    const data = await imported([{ file: name, title: "Kept" }, { id: "2", file: "activities/2.tcx.gz", title: "Fine" }], {
+      [name]: bytes,
+      "activities/2.tcx.gz": good,
+    });
+
+    expect(data.activities.find((a) => a.title === "Kept")).toMatchObject({ avgHr: null, maxHr: null, distanceM: 6062.6 });
+    expect(data.activities.find((a) => a.title === "Fine")).toMatchObject({ avgHr: 100 });
+    expect(lines).toContain("Imported 2 activities and 2 files");
+    expect(lines.filter((line) => line.startsWith("Warning"))).toEqual([expect.stringContaining("2026-11-04T18:11:23")]);
+  });
+
+  test("stays stale, so every generate retries it and warns again", async () => {
+    await imported([{ file: "activities/1.tcx.gz" }], { "activities/1.tcx.gz": new Uint8Array([1, 2, 3]) });
+    lines = [];
+    await generate(deps());
+    expect(lines.filter((line) => line.startsWith("Warning"))).toHaveLength(1);
+  });
+});
+
 describe("Settings", () => {
   const withSettings = (change: object) =>
     writeFileSync(deps().settingsPath, JSON.stringify({ ...VALID_SETTINGS, ...change }));
@@ -222,6 +327,46 @@ describe("generate", () => {
       timeZone: "Asia/Tokyo",
       newestActivity: "2026-11-05",
     });
+  });
+
+  // Tests can't change DERIVE_VERSION, so the row is put back as older code would have left it.
+  const ageRows = (change: string) => {
+    const db = new Database(deps().dbPath);
+    db.run(`UPDATE activity SET derive_version = 0, time_at_bpm = '{"60":1}'`);
+    if (change) db.run(change);
+    db.close();
+  };
+
+  test("re-derives a row with an older derive_version from its stored file", async () => {
+    const file = tcx([{ at: 0, bpm: 100 }, { at: 2, bpm: 100 }]);
+    await imported([{ file: "activities/1.tcx.gz" }], { "activities/1.tcx.gz": file });
+    ageRows("");
+
+    const status = await generate(deps());
+
+    expect(status.ok && status.data.activities[0]).toMatchObject({ avgHr: 100, maxHr: 100 });
+  });
+
+  test("leaves a current row alone", async () => {
+    await imported([{ file: "activities/1.tcx.gz" }], { "activities/1.tcx.gz": tcx([{ at: 0, bpm: 100 }, { at: 2, bpm: 100 }]) });
+    const db = new Database(deps().dbPath);
+    db.run(`UPDATE activity SET time_at_bpm = '{"60":1}'`);
+    db.close();
+
+    const status = await generate(deps());
+
+    expect(status.ok && status.data.activities[0]).toMatchObject({ avgHr: 60 });
+  });
+
+  test("clears old derived values when a re-derive can't read the file", async () => {
+    const file = tcx([{ at: 0, bpm: 100 }, { at: 2, bpm: 100 }]);
+    await imported([{ file: "activities/1.tcx.gz" }], { "activities/1.tcx.gz": file });
+    ageRows("UPDATE activity_file SET file_gz = x'010203'");
+
+    const status = await generate(deps());
+
+    expect(status.ok && status.data.activities[0]).toMatchObject({ avgHr: null, maxHr: null });
+    expect(lines.join("\n")).toContain("Warning");
   });
 
   test("works on an empty database", async () => {

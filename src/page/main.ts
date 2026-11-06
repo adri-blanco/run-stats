@@ -23,6 +23,7 @@ function row(a: ActivityRow): HTMLElement {
     el("td", "", a.type),
     el("td", "num", a.distanceM ? `${(a.distanceM / 1000).toFixed(1)} km` : "–"),
     el("td", "num", duration(a.movingS)),
+    el("td", "num", a.avgHr === null ? "" : String(Math.round(a.avgHr))),
   );
 }
 
@@ -47,7 +48,7 @@ document.getElementById("app")!.append(
     el(
       "table",
       "acts",
-      el("thead", "", el("tr", "", ...["Date", "Activity", "Type", "Distance", "Time"].map((h) => el("th", "", h)))),
+      el("thead", "", el("tr", "", ...["Date", "Activity", "Type", "Distance", "Time", "HR"].map((h) => el("th", "", h)))),
       el("tbody", "", ...activities.map(row)),
     ),
   ),
