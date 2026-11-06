@@ -1,9 +1,10 @@
 import { parse } from "csv-parse/sync";
 import { gzipSync, unzipSync, type Unzipped } from "fflate";
 import { readFileSync } from "node:fs";
-import type { NewActivity } from "./store";
+import type { NewActivity, Store, StoredActivity } from "./store";
 
 const COLUMN = { id: 0, start: 1, title: 2, type: 3, file: 12, elapsed: 15, moving: 16, distance: 17, tags: 103 };
+const SAME_ACTIVITY_MS = 60_000;
 const SPANISH_MONTHS = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sept", "oct", "nov", "dic"];
 const ACTIVITY_TYPES: Record<string, string> = {
   Carrera: "run",
@@ -71,4 +72,30 @@ export function readBulkExport(zipPath: string, log: (line: string) => void): Ne
       file: originalFile(zip, row[COLUMN.file]!, log),
     };
   });
+}
+
+// shortcut: an overwrite drops the stored file if the new zip lacks it (the import warns), keep it once #18 can show it.
+export function storeExport(store: Store, activities: NewActivity[]): StoredActivity[] {
+  const stored = store.activities();
+  const newest = (rows: { startUtc: string }[]) => rows.map((row) => row.startUtc).sort().at(-1) ?? "";
+  const newestStored = newest(stored.filter((row) => row.source === "strava"));
+  // An empty export counts as older too, or it would delete everything.
+  if (newest(activities) < newestStored) {
+    throw new Error(`Refused: the zip's newest activity (${newest(activities) || "none"}) is older than the newest stored one (${newestStored})`);
+  }
+
+  // strava_id first, so a start-time match can't take a row that another export row owns.
+  const stravaIds = new Set(activities.map((a) => a.stravaId));
+  const knownIds = new Set(stored.map((row) => row.stravaId));
+  const unmatched = stored.filter((row) => !stravaIds.has(row.stravaId!));
+  for (const a of activities.filter((a) => !knownIds.has(a.stravaId))) {
+    const match = unmatched.findIndex((row) => Math.abs(Date.parse(row.startUtc) - Date.parse(a.startUtc)) <= SAME_ACTIVITY_MS);
+    if (match >= 0) unmatched.splice(match, 1);
+  }
+  const missing = unmatched.filter((row) => row.source === "strava");
+
+  // Removing cascades to files and derived rows, so an overwrite can't keep stale ones.
+  store.remove(stored.filter((row) => !unmatched.includes(row)).concat(missing).map((row) => row.id));
+  store.insertAll(activities);
+  return missing;
 }

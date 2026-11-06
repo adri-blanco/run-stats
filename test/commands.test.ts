@@ -172,6 +172,100 @@ describe("importExport", () => {
   });
 });
 
+describe("importing a later Bulk export", () => {
+  test("overwrites an activity with the same strava_id, so a title edited on Strava flows in", async () => {
+    await imported([{ id: "1", title: "Morning run" }]);
+    const data = await imported([{ id: "1", title: "Edited on Strava" }]);
+    expect(data.activities.map((a) => a.title)).toEqual(["Edited on Strava"]);
+  });
+
+  test("overwrites an activity with a new strava_id that starts within 60 s", async () => {
+    await imported([{ id: "1", date: "1 ene 2025, 10:00:00", title: "Before" }]);
+    const data = await imported([{ id: "2", date: "1 ene 2025, 10:01:00", title: "Re-uploaded" }]);
+    expect(data.activities.map((a) => a.title)).toEqual(["Re-uploaded"]);
+    expect(lines.join("\n")).not.toContain("Before");
+  });
+
+  test("matches on strava_id before start time, so a new activity can't take a neighbour's place", async () => {
+    await imported([{ id: "1", date: "1 ene 2025, 10:00:00", title: "Old title" }]);
+    const data = await imported([
+      { id: "2", date: "1 ene 2025, 10:00:30", title: "New neighbour" },
+      { id: "1", date: "1 ene 2025, 10:00:00", title: "New title" },
+    ]);
+    expect(data.activities.map((a) => a.title)).toEqual(["New neighbour", "New title"]);
+  });
+
+  test("deletes and prints a Strava activity missing from the export", async () => {
+    await imported([
+      { id: "1", date: "1 ene 2025, 10:00:00", title: "Removed on Strava" },
+      { id: "2", date: "1 feb 2025, 10:00:00", title: "Still there" },
+    ]);
+    const data = await imported([{ id: "2", date: "1 feb 2025, 10:00:00", title: "Still there" }]);
+    expect(data.activities.map((a) => a.title)).toEqual(["Still there"]);
+    expect(lines).toContainEqual(expect.stringContaining("Removed on Strava"));
+    expect(lines).toContainEqual(expect.stringContaining("2025-01-01"));
+  });
+
+  test("does not match an activity that starts more than 60 s away", async () => {
+    await imported([{ id: "1", date: "1 ene 2025, 10:00:00", title: "Before" }]);
+    await imported([{ id: "2", date: "1 ene 2025, 10:01:01", title: "Different session" }]);
+    expect(lines).toContainEqual(expect.stringContaining("Before"));
+  });
+
+  test("imports the same export twice without changing or printing anything", async () => {
+    const rows = [
+      { id: "1", date: "1 ene 2025, 10:00:00", title: "One" },
+      { id: "2", date: "1 ene 2025, 10:00:30", title: "Two" },
+    ];
+    const first = await imported(rows);
+    lines = [];
+    const second = await imported(rows);
+    expect(second.activities).toEqual(first.activities);
+    expect(lines).toEqual(["Imported 2 activities and 0 files"]);
+  });
+
+  test.each([
+    ["older", exportZip([{ id: "1", date: "1 ene 2025, 09:59:59" }])],
+    ["empty", exportZip([])],
+  ])("refuses an %s export and changes nothing", async (_, zip) => {
+    await imported([{ id: "1", date: "1 ene 2025, 10:00:00", title: "Kept" }]);
+    const page = await Bun.file(deps().outPath).text();
+
+    const status = await importExport(writeZip(zip), deps());
+
+    expect(status).toEqual({ ok: false, error: expect.stringContaining("Refused") });
+    expect(await Bun.file(deps().outPath).text()).toBe(page);
+    const after = await generate(deps());
+    expect(after.ok && after.data.activities.map((a) => a.title)).toEqual(["Kept"]);
+  });
+
+  test("rolls back overwrites and deletions when a later row fails", async () => {
+    const older = { id: "1", date: "1 ene 2025, 10:00:00", title: "Old" };
+    const newer = { id: "2", date: "1 feb 2025, 10:00:00", title: "New" };
+    await imported([older, newer]);
+
+    const zip = exportZip([{ ...newer, title: "Edited" }, { ...newer, title: "Twice" }]);
+    const status = await importExport(writeZip(zip), deps());
+
+    expect(status.ok).toBe(false);
+    const after = await generate(deps());
+    expect(after.ok && after.data.activities.map((a) => a.title)).toEqual(["New", "Old"]);
+  });
+
+  test("rolls everything back when the page can't be written", async () => {
+    const row = { id: "1", title: "Stored" };
+    await imported([row]);
+    writeFileSync(join(dir, "blocked"), "");
+
+    const zip = writeZip(exportZip([{ ...row, title: "Edited" }]));
+    const status = await importExport(zip, { ...deps(), outPath: join(dir, "blocked", "dashboard.html") });
+
+    expect(status.ok).toBe(false);
+    const after = await generate(deps());
+    expect(after.ok && after.data.activities.map((a) => a.title)).toEqual(["Stored"]);
+  });
+});
+
 describe("Settings", () => {
   const withSettings = (change: object) =>
     writeFileSync(deps().settingsPath, JSON.stringify({ ...VALID_SETTINGS, ...change }));

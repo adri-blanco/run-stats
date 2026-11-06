@@ -13,10 +13,16 @@ export type NewActivity = {
   file: { format: string; gz: Uint8Array } | null;
 };
 
-export type StoredActivity = Pick<NewActivity, "startUtc" | "type" | "title" | "distanceM" | "movingS">;
+export type StoredActivity = Pick<NewActivity, "startUtc" | "type" | "title" | "distanceM" | "movingS"> & {
+  id: number;
+  stravaId: string | null;
+  source: string;
+};
 
 export type Store = {
+  transaction<T>(run: () => Promise<T>): Promise<T>;
   insertAll(activities: NewActivity[]): void;
+  remove(ids: number[]): void;
   activities(): StoredActivity[];
 };
 
@@ -52,7 +58,20 @@ export async function withStore<T>(path: string, use: (store: Store) => Promise<
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
     );
     const insertFile = db.query("INSERT INTO activity_file (activity_id, format, file_gz) VALUES (?, ?, ?)");
+    const removeActivity = db.query("DELETE FROM activity WHERE id = ?");
     return await use({
+      // Hand-written because db.transaction can't span the await of the page build.
+      transaction: async (run) => {
+        db.run("BEGIN");
+        try {
+          const result = await run();
+          db.run("COMMIT");
+          return result;
+        } catch (error) {
+          db.run("ROLLBACK");
+          throw error;
+        }
+      },
       insertAll: db.transaction((activities: NewActivity[]) => {
         for (const a of activities) {
           const { id } = insertActivity.get(
@@ -61,10 +80,12 @@ export async function withStore<T>(path: string, use: (store: Store) => Promise<
           if (a.file) insertFile.run(id, a.file.format, a.file.gz);
         }
       }),
+      remove: (ids) => ids.forEach((id) => removeActivity.run(id)),
       activities: () =>
         db
           .query(
-            `SELECT start_utc AS startUtc, type, title, distance_m AS distanceM, moving_s AS movingS
+            `SELECT id, strava_id AS stravaId, source, start_utc AS startUtc, type, title,
+                    distance_m AS distanceM, moving_s AS movingS
              FROM activity ORDER BY start_utc DESC`,
           )
           .all() as StoredActivity[],
