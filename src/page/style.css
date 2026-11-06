@@ -10,10 +10,17 @@ small{color:var(--mute)}
 .night small{color:#b9b4e6}
 .content{max-width:1280px;margin:0 auto;padding:18px 24px}
 .story{font-size:21px;font-weight:800;margin:16px 0 0}
+.filters{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:10px 0}
+.filters select,.filters input{font:inherit;font-size:13px;padding:3px 8px;border:1px solid var(--line);border-radius:7px;background:#fff;color:var(--ink)}
 .acts{width:100%;border-collapse:collapse;margin-top:6px;font-size:14px}
 .acts th{text-align:left;font-size:12px;color:var(--mute);border-bottom:2px solid var(--line);padding:5px 8px 5px 0}
+.acts th button{all:unset;cursor:pointer}
+.acts th button:hover{color:var(--ink)}
+.acts th button:focus-visible{outline:2px solid #2563a8;outline-offset:2px}
+.acts th[aria-sort=ascending] button::after{content:" ▲"}
+.acts th[aria-sort=descending] button::after{content:" ▼"}
 .acts td{padding:6px 8px 6px 0;border-bottom:1px solid var(--line);vertical-align:top}
-.acts td:first-child{white-space:nowrap}
+.acts td.num{white-space:nowrap}
 .tag{font-size:11px;font-weight:600;padding:1px 6px;border-radius:4px;background:#f5f6f8;color:var(--mute);white-space:nowrap;margin-left:3px}
 .tag.race{background:#fbe6da;color:#e0257f}
 .tag.session{background:#ebe7fb;color:#5b3fd6}
@@ -31,3 +38,6 @@ small{color:var(--mute)}
 .big small{font-size:13px}
 @media (max-width:1000px){.huge{grid-template-columns:repeat(3,1fr)}}
 @media (max-width:560px){.huge{grid-template-columns:1fr 1fr}.big:last-child{grid-column:span 2}}
+.more{all:unset;display:inline-block;cursor:pointer;margin-top:10px;padding:4px 12px;border:1px solid var(--line);border-radius:7px;font-size:13px}
+.more[hidden]{display:none}
+.more:focus-visible{outline:2px solid #2563a8}

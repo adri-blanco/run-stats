@@ -113,11 +113,13 @@ describe("importExport", () => {
     const data = await imported([{ title: "Correr por correr" }]);
     expect(data.activities).toEqual([
       {
+        stravaId: "1",
         date: "2026-11-04",
         title: "Correr por correr",
         type: "run",
         distanceM: 6062.6,
         movingS: 2515,
+        paceSPerKm: 414.838518127536, // 6:55 /km
         avgHr: null,
         maxHr: null,
         race: false,
@@ -126,6 +128,15 @@ describe("importExport", () => {
         sessionDetail: null,
       },
     ]);
+  });
+
+  test("gives a pace from moving time to runs with a distance only", async () => {
+    const data = await imported([
+      { id: "1", date: "3 nov 2026, 18:00:00", moving: "1500", distance: "5000" },
+      { id: "2", date: "2 nov 2026, 18:00:00", distance: "0" },
+      { id: "3", date: "1 nov 2026, 18:00:00", type: "Senderismo", moving: "3600", distance: "5000" },
+    ]);
+    expect(data.activities.map((a) => a.paceSPerKm)).toEqual([300, null, null]);
   });
 
   test.each([
