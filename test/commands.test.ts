@@ -2,10 +2,10 @@ import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Encoder, Profile } from "@garmin/fitsdk";
 import { gunzipSync, gzipSync, zipSync } from "fflate";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { generate, importExport } from "../src/commands";
+import { generate, importExport, refresh } from "../src/commands";
 
 const COLUMNS = 104;
 const VALID_SETTINGS = {
@@ -107,6 +107,193 @@ beforeEach(() => {
 });
 
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+// The assumed AccessLink v3 shape, in this one place. #29 checks it against the real API.
+function polarExercise(fields: Record<string, unknown> = {}) {
+  return {
+    id: "2AC312F",
+    start_time: "2026-11-05T09:00:00",
+    start_time_utc_offset: 60,
+    duration: "PT1H2M3S",
+    distance: 12000.5,
+    sport: "RUNNING",
+    detailed_sport_info: "RUNNING",
+    ...fields,
+  };
+}
+
+const POLAR_POINTS = [{ at: 0, bpm: 100, m: 0 }, { at: 5, bpm: 120, m: 600 }, { at: 10, bpm: 140, m: 1200 }];
+const POLAR_API = "https://www.polaraccesslink.com/v3/exercises";
+
+type PolarOptions = { fitBody?: string; respond?: (url: string) => Response | undefined; requests?: string[] };
+
+function polarDeps(exercises: unknown[], { fitBody, respond, requests }: PolarOptions = {}) {
+  return {
+    ...deps(),
+    polarToken: "fake-token",
+    fetch: async (url: string, init?: RequestInit) => {
+      if (new Headers(init?.headers).get("Authorization") !== "Bearer fake-token") return new Response(null, { status: 401 });
+      requests?.push(url);
+      const response = respond?.(url);
+      if (response) return response;
+      if (url === POLAR_API) return Response.json(exercises);
+      return new Response(fitBody ?? Buffer.from(gunzipSync(fit(POLAR_POINTS))));
+    },
+  };
+}
+
+async function refreshed(exercises: unknown[], options?: PolarOptions) {
+  const status = await refresh(polarDeps(exercises, options));
+  if (!status.ok) throw new Error(status.error);
+  return status.data;
+}
+
+describe("refresh", () => {
+  test("stores a new exercise as a Provisional activity, with heart rate and best efforts from its FIT file", async () => {
+    const requests: string[] = [];
+    const data = await refreshed([polarExercise()], { requests });
+
+    expect(data.activities).toEqual([
+      {
+        stravaId: null,
+        date: "2026-11-05",
+        title: null,
+        type: "run",
+        distanceM: 12000.5,
+        movingS: 3723,
+        stoppedS: 0,
+        paceSPerKm: 3723 / 12.0005,
+        avgHr: 110,
+        maxHr: 120,
+        race: false,
+        longRun: true,
+        sessionType: null,
+        sessionDetail: null,
+      },
+    ]);
+    expect(data.allTime.best1k).toBe(10);
+    expect(data.meta.awaitingStrava).toBe(1);
+    expect(requests).toEqual([POLAR_API, `${POLAR_API}/2AC312F/fit`]);
+  });
+
+  test("uses the UTC offset only to find the start, and groups by the settings time zone", async () => {
+    const data = await refreshed([polarExercise({ start_time: "2026-11-05T22:00:00", start_time_utc_offset: -300 })]);
+    expect(data.activities[0]!.date).toBe("2026-11-06");
+  });
+
+  test("skips an exercise within 60 s of a stored activity, and adds one just outside", async () => {
+    await imported([{ date: "5 nov 2026, 8:00:30", title: "On Strava" }]);
+    const data = await refreshed([
+      polarExercise({ id: "near", start_time: "2026-11-05T08:59:30" }),
+      polarExercise({ id: "far", start_time: "2026-11-05T08:59:29" }),
+    ]);
+    expect(data.activities.map((a) => a.title)).toEqual(["On Strava", null]);
+    expect(lines).toContain("Added 1 Provisional activities");
+  });
+
+  test("a second refresh adds nothing, and the page is still regenerated", async () => {
+    await refreshed([polarExercise()]);
+    rmSync(deps().outPath);
+    const data = await refreshed([polarExercise()]);
+    expect(data.activities).toHaveLength(1);
+    expect(await Bun.file(deps().outPath).exists()).toBe(true);
+  });
+
+  test("Long run comes from distance, and Provisional runs have no Race mark or Session type", async () => {
+    const data = await refreshed([
+      polarExercise({ id: "short", distance: 9000 }),
+      polarExercise({ id: "hike", start_time: "2026-11-04T09:00:00", detailed_sport_info: "HIKING" }),
+    ]);
+    expect(data.activities.map((a) => [a.type, a.longRun, a.race, a.sessionType])).toEqual([
+      ["run", false, false, null],
+      ["hike", false, false, null],
+    ]);
+    expect(data.meta.awaitingStrava).toBe(2);
+  });
+
+  test("an unknown Polar sport becomes other and is printed", async () => {
+    const data = await refreshed([polarExercise({ sport: "OTHER", detailed_sport_info: "WATERSPORTS_WATERSKI" })]);
+    expect(data.activities[0]!.type).toBe("other");
+    expect(lines).toContain(`Unknown Polar sport "WATERSPORTS_WATERSKI" on exercise 2AC312F, stored as other`);
+  });
+
+  test("an exercise with no distance is stored with 0", async () => {
+    const { distance, ...gym } = polarExercise({ detailed_sport_info: "STRENGTH_TRAINING" });
+    const data = await refreshed([gym]);
+    expect(data.activities[0]).toMatchObject({ type: "strength", distanceM: 0 });
+  });
+
+  test("warns when the newest stored activity is over 30 days old", async () => {
+    await imported([{ date: "7 oct 2026, 9:59:59" }]);
+    await refreshed([]);
+    expect(lines.join("\n")).toContain("Warning: the newest stored activity is over 30 days old");
+  });
+
+  test("doesn't warn at exactly 30 days, or on an empty store", async () => {
+    await refreshed([]);
+    await imported([{ date: "7 oct 2026, 10:00:00" }]);
+    await refreshed([]);
+    expect(lines.join("\n")).not.toContain("30 days");
+  });
+
+  test("a missing POLAR_ACCESS_TOKEN aborts with a clear message and calls nothing", async () => {
+    const requests: string[] = [];
+    const status = await refresh({ ...polarDeps([], { requests }), polarToken: undefined });
+    expect(status).toEqual({ ok: false, error: expect.stringContaining("POLAR_ACCESS_TOKEN") });
+    expect(requests).toEqual([]);
+  });
+
+  test("an auth failure partway through aborts and stores nothing", async () => {
+    await imported([{ title: "Kept" }]);
+    const status = await refresh(
+      polarDeps(
+        [polarExercise({ id: "first" }), polarExercise({ id: "second", start_time: "2026-11-04T09:00:00" })],
+        { respond: (url) => (url.includes("second") ? new Response(null, { status: 403 }) : undefined) },
+      ),
+    );
+    expect(status).toEqual({ ok: false, error: expect.stringContaining("403") });
+    const after = await generate(deps());
+    expect(after.ok && after.data.activities.map((a) => a.title)).toEqual(["Kept"]);
+  });
+
+  test("any other failed Polar request aborts too", async () => {
+    const status = await refresh(polarDeps([], { respond: () => new Response(null, { status: 500 }) }));
+    expect(status).toEqual({ ok: false, error: expect.stringContaining("500") });
+  });
+
+  test("rolls back when the page can't be written", async () => {
+    mkdirSync(deps().outPath, { recursive: true });
+    const status = await refresh(polarDeps([polarExercise()]));
+    expect(status.ok).toBe(false);
+    rmSync(deps().outPath, { recursive: true });
+    const after = await generate(deps());
+    expect(after.ok && after.data.activities).toEqual([]);
+  });
+
+  test("an exercise that doesn't have the assumed shape aborts rather than storing wrong values", async () => {
+    const badStart = await refresh(polarDeps([polarExercise({ start_time: "2026-11-05T09:00:00Z" })]));
+    expect(badStart).toEqual({ ok: false, error: expect.stringContaining("start time") });
+    const badDuration = await refresh(polarDeps([polarExercise({ duration: 3723 })]));
+    expect(badDuration).toEqual({ ok: false, error: expect.stringContaining("duration") });
+  });
+
+  test("a corrupt FIT file keeps the summary, warns, and stays retryable", async () => {
+    const data = await refreshed([polarExercise()], { fitBody: "not a fit file" });
+    expect(data.activities[0]).toMatchObject({ distanceM: 12000.5, avgHr: null });
+    expect(lines.join("\n")).toContain("Warning");
+
+    lines.length = 0;
+    await generate(deps());
+    expect(lines.join("\n")).toContain("Warning");
+  });
+
+  test("a later Bulk export replaces a Provisional activity once", async () => {
+    await refreshed([polarExercise()]);
+    const data = await imported([{ date: "5 nov 2026, 8:00:30", title: "From Strava" }]);
+    expect(data.activities.map((a) => a.title)).toEqual(["From Strava"]);
+    expect(data.meta.awaitingStrava).toBe(0);
+  });
+});
 
 describe("importExport", () => {
   test("stores an activity from a Bulk export and returns it in the DashboardData", async () => {
@@ -776,6 +963,7 @@ describe("generate", () => {
       generatedAt: "2026-11-06T10:00:00.000Z",
       timeZone: "Asia/Tokyo",
       newestActivity: "2026-11-05",
+      awaitingStrava: 0,
     });
   });
 

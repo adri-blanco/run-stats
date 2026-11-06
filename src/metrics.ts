@@ -4,7 +4,7 @@ import type { StoredActivity, TimeAtBpm } from "./store";
 export type ActivityRow = {
   stravaId: string | null;
   date: string;
-  title: string;
+  title: string | null;
   type: string;
   distanceM: number;
   movingS: number;
@@ -25,7 +25,7 @@ type Bests = { best1k: number | null; best5k: number | null; best10k: number | n
 export type CurrentLevel = Bests & { longRuns: number; weeks: number; weeksWithLongRun: number; recent: ActivityRow[] };
 
 export type DashboardData = {
-  meta: { generatedAt: string; timeZone: string; newestActivity: string | null };
+  meta: { generatedAt: string; timeZone: string; newestActivity: string | null; awaitingStrava: number };
   activities: ActivityRow[];
   currentLevel: Record<Period, CurrentLevel>;
   allTime: Bests & { fastest5kRace: ActivityRow | null; fastest7kRace: ActivityRow | null; fastest10kRace: ActivityRow | null };
@@ -140,7 +140,7 @@ export function buildDashboardData(stored: StoredActivity[], settings: Settings,
     ...heartRate(timeAtBpm),
     race: type === "run" && tags.split("|").includes("race"),
     longRun: type === "run" && distanceM >= LONG_RUN_M,
-    ...session(type === "run" ? title : ""),
+    ...session(type === "run" ? (title ?? "") : ""),
   }));
   const runs = stored.map((a, i) => ({ ...a, row: activities[i]! })).filter((a) => a.type === "run");
   // With nothing stored there is no newest activity, and every period is empty anyway.
@@ -151,6 +151,7 @@ export function buildDashboardData(stored: StoredActivity[], settings: Settings,
       generatedAt: now.toISOString(),
       timeZone: settings.timeZone,
       newestActivity: activities[0]?.date ?? null,
+      awaitingStrava: stored.filter((a) => a.source === "polar").length,
     },
     activities,
     currentLevel: Object.fromEntries(spans.map(([period, span]) => [period, currentLevel(runs, activities, span)])) as Record<Period, CurrentLevel>,

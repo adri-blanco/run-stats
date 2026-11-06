@@ -1,6 +1,6 @@
 import type { ActivityRow, CurrentLevel, DashboardData, Period } from "../metrics";
 
-const { activities, currentLevel, allTime }: DashboardData = JSON.parse(document.getElementById("data")!.textContent!);
+const { activities, currentLevel, allTime, meta }: DashboardData = JSON.parse(document.getElementById("data")!.textContent!);
 
 function el(tag: string, className: string, ...children: (Node | string)[]): HTMLElement {
   const node = document.createElement(tag);
@@ -17,6 +17,8 @@ function duration(seconds: number): string {
 // Shorter than the table's durations: 25:19, not 0:25:19.
 const effort = (seconds: number | null) => (seconds === null ? "–" : duration(seconds).replace(/^0:0?/, ""));
 const km = (run: ActivityRow | null) => (run === null ? "–" : (run.distanceM / 1000).toFixed(1));
+
+const titleOf = (a: ActivityRow) => a.title ?? `${a.type[0]!.toUpperCase()}${a.type.slice(1)}, from Polar`;
 
 function big(value: string, label: string, line: string): HTMLElement {
   return el("div", "big", el("b", "num", value), el("span", "", label), el("small", "", line));
@@ -82,6 +84,7 @@ function rightNow(): HTMLElement[] {
   const selector = el("span", "seg", ...buttons);
   selector.setAttribute("role", "group");
   selector.setAttribute("aria-label", "Period");
+  const awaiting = `${meta.awaitingStrava} recent ${meta.awaitingStrava === 1 ? "activity" : "activities"} awaiting Strava details`;
   const labels = el("tr", "", ...COLUMNS.map(({ label }) => el("th", "", label)));
   return [
     el("div", "now", el("h2", "", "Right now"), selector),
@@ -89,6 +92,7 @@ function rightNow(): HTMLElement[] {
     groups,
     el("h3", "recent", "Recent activities"),
     el("table", "acts", el("thead", "", labels), recent),
+    ...(meta.awaitingStrava ? [el("small", "awaiting", awaiting)] : []),
   ];
 }
 
@@ -98,8 +102,8 @@ function pace(seconds: number): string {
 }
 
 function activityLink(a: ActivityRow): Node | string {
-  if (!a.stravaId) return a.title;
-  const link = el("a", "", a.title) as HTMLAnchorElement;
+  if (!a.stravaId) return titleOf(a);
+  const link = el("a", "", titleOf(a)) as HTMLAnchorElement;
   link.href = `https://www.strava.com/activities/${a.stravaId}`;
   link.target = "_blank";
   link.rel = "noopener";
@@ -118,6 +122,7 @@ function row(a: ActivityRow): HTMLElement {
       ...(a.race ? [el("span", "tag race", "race")] : []),
       ...(a.longRun ? [el("span", "tag", "long run")] : []),
       ...(a.sessionType ? [el("span", "tag session", a.sessionType)] : []),
+      ...(a.stravaId ? [] : [el("span", "tag", "not on Strava yet")]),
     ),
     el("td", "", a.type),
     el("td", "num", a.distanceM ? `${(a.distanceM / 1000).toFixed(1)} km` : "–"),
@@ -133,7 +138,7 @@ type Column = { label: string; value: (a: ActivityRow) => Value; ascendingFirst?
 // A 0 shows as "–", so it counts as empty when sorting.
 const COLUMNS: Column[] = [
   { label: "Date", value: (a) => a.date },
-  { label: "Activity", value: (a) => a.title || null, ascendingFirst: true },
+  { label: "Activity", value: (a) => titleOf(a) || null, ascendingFirst: true },
   { label: "Type", value: (a) => a.type, ascendingFirst: true },
   { label: "Distance", value: (a) => a.distanceM || null },
   { label: "Time", value: (a) => a.movingS || null },
@@ -177,7 +182,7 @@ function matches(a: ActivityRow): boolean {
     (!markFilter.value || (markFilter.value === "Races" ? a.race : a.longRun)) &&
     (!sessionFilter.value || a.sessionType === sessionFilter.value) &&
     (!yearFilter.value || a.date.startsWith(yearFilter.value)) &&
-    a.title.toLowerCase().includes(search.value.toLowerCase())
+    titleOf(a).toLowerCase().includes(search.value.toLowerCase())
   );
 }
 
