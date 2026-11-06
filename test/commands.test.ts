@@ -14,7 +14,7 @@ const VALID_SETTINGS = {
   firstBarrierSeconds: { "1K": [300, 270, 240], "5K": [1800, 1650, 1500], "10K": [3600, 3300, 3000] },
 };
 
-type Row = { id?: string; date?: string; title?: string; type?: string; file?: string; moving?: string; distance?: string; tags?: string };
+type Row = { id?: string; date?: string; title?: string; type?: string; file?: string; elapsed?: string; moving?: string; distance?: string; tags?: string };
 
 function csvRow(row: Row): string {
   const cells = Array<string>(COLUMNS).fill("");
@@ -23,7 +23,7 @@ function csvRow(row: Row): string {
   cells[2] = row.title ?? "Morning run";
   cells[3] = row.type ?? "Carrera";
   cells[12] = row.file ?? "";
-  cells[15] = "2577.0";
+  cells[15] = row.elapsed ?? "2577.0";
   cells[16] = row.moving ?? "2515.0";
   cells[17] = row.distance ?? "6062.6";
   cells[103] = row.tags ?? "running";
@@ -119,6 +119,7 @@ describe("importExport", () => {
         type: "run",
         distanceM: 6062.6,
         movingS: 2515,
+        stoppedS: 62,
         paceSPerKm: 414.838518127536, // 6:55 /km
         avgHr: null,
         maxHr: null,
@@ -346,17 +347,17 @@ describe("periods", () => {
     ["1y", "5 nov 2025", "4 nov 2025"],
   ] as const)("%s runs from %s, leaving out %s", async (period, inside, outside) => {
     const data = await imported([run("1", "4 nov 2026", "5000"), run("2", inside, "12000"), run("3", outside, "15000")]);
-    expect(data.currentLevel[period]).toMatchObject({ longestRunM: 12000, longRuns: 1 });
+    expect(data.currentLevel[period]).toMatchObject({ longestRun: { distanceM: 12000 }, longRuns: 1 });
   });
 
   test("all starts at the first activity", async () => {
     const data = await imported([run("1", "4 nov 2026", "5000"), run("2", "15 ene 2022", "15000")]);
-    expect(data.currentLevel.all).toMatchObject({ longestRunM: 15000, longRuns: 1 });
+    expect(data.currentLevel.all).toMatchObject({ longestRun: { distanceM: 15000 }, longRuns: 1 });
   });
 
   test("a period ends on the newest activity of any type, not the newest run", async () => {
     const data = await imported([run("1", "4 nov 2026", "0", { type: "Senderismo" }), run("2", "14 oct 2026", "12000")]);
-    expect(data.currentLevel["3w"]).toMatchObject({ longestRunM: null, longRuns: 0 });
+    expect(data.currentLevel["3w"]).toMatchObject({ longestRun: null, longRuns: 0 });
   });
 
   test("a period ends on the local date of the newest activity, using timeZone", async () => {
@@ -364,7 +365,7 @@ describe("periods", () => {
       { id: "1", date: "31 oct 2026, 23:30:00", distance: "5000" }, // already 1 November in Madrid
       { id: "2", date: "11 oct 2026, 20:00:00", distance: "12000" },
     ]);
-    expect(data.currentLevel["3w"].longestRunM).toBe(5000);
+    expect(data.currentLevel["3w"].longestRun?.distanceM).toBe(5000);
   });
 
   test.each([
@@ -372,7 +373,7 @@ describe("periods", () => {
     ["1y", "29 feb 2024", "1 mar 2023", "28 feb 2023"],
   ] as const)("%s counts back calendar months from %s, on a date the start month lacks", async (period, end, inside, outside) => {
     const data = await imported([run("1", end, "5000"), run("2", inside, "12000"), run("3", outside, "15000")]);
-    expect(data.currentLevel[period]).toMatchObject({ longestRunM: 12000, longRuns: 1 });
+    expect(data.currentLevel[period]).toMatchObject({ longestRun: { distanceM: 12000 }, longRuns: 1 });
   });
 
   test("best efforts follow the period, with the all-time value alongside", async () => {
@@ -390,8 +391,8 @@ describe("periods", () => {
 
   test("the period and all-time longest run and Long runs count runs only", async () => {
     const data = await imported([run("1", "4 nov 2026", "5000"), run("2", "3 nov 2026", "30000", { type: "Senderismo" })]);
-    expect(data.currentLevel["8w"]).toMatchObject({ longestRunM: 5000, longRuns: 0 });
-    expect(data.allTime.longestRunM).toBe(5000);
+    expect(data.currentLevel["8w"]).toMatchObject({ longestRun: { distanceM: 5000 }, longRuns: 0 });
+    expect(data.allTime.longestRun?.distanceM).toBe(5000);
   });
 
   test("weeks with a Long run count 7-day blocks back from the end, not calendar weeks", async () => {
@@ -415,11 +416,11 @@ describe("periods", () => {
 
   test("a period with no runs is empty", async () => {
     const data = await imported([run("1", "4 nov 2026", "0", { type: "Senderismo" })]);
-    expect(data.currentLevel["8w"]).toEqual({
+    expect(data.currentLevel["8w"]).toMatchObject({
       best1k: null,
       best5k: null,
       best10k: null,
-      longestRunM: null,
+      longestRun: null,
       longRuns: 0,
       weeks: 8,
       weeksWithLongRun: 0,
@@ -430,6 +431,115 @@ describe("periods", () => {
       runs: 0,
       runsPerWeek: 0,
       crossTrainingPerWeek: 0.125,
+    });
+  });
+
+  test("the Longest run follows the period and carries its details", async () => {
+    const data = await imported([
+      run("1", "4 nov 2026", "8000", { title: "Recent long", elapsed: "2500", moving: "2400" }),
+      run("2", "4 nov 2024", "15000", { title: "Old long" }),
+    ]);
+    expect(data.currentLevel["8w"].longestRun).toMatchObject({ stravaId: "1", title: "Recent long", date: "2026-11-04", movingS: 2400, paceSPerKm: 300, stoppedS: 100 });
+    expect(data.currentLevel.all.longestRun?.title).toBe("Old long");
+  });
+
+  test("the Longest run is the newest of equal runs", async () => {
+    const data = await imported([run("1", "4 nov 2026", "8000", { title: "Newest" }), run("2", "3 nov 2026", "8000")]);
+    expect(data.currentLevel["8w"].longestRun?.title).toBe("Newest");
+  });
+
+  test("Recent activities are the newest 8 of any type, newest first", async () => {
+    const days = ["4", "3", "2", "1"].flatMap((day) => [`${day} nov 2026`, `${day} oct 2026`, `${day} sept 2026`]);
+    const rows = days.map((date, i) => run(String(i + 1), date, "5000", { type: i % 2 ? "Senderismo" : "Carrera" }));
+    const { currentLevel, activities } = await imported(rows);
+    expect(currentLevel["1y"].recent).toEqual(activities.slice(0, 8));
+    expect(new Set(currentLevel["1y"].recent.map((a) => a.type))).toEqual(new Set(["run", "hike"]));
+  });
+
+  test("Recent activities stay inside the period", async () => {
+    const data = await imported([run("1", "4 nov 2026", "5000"), run("2", "14 oct 2026", "5000", { type: "Senderismo" })]);
+    expect(data.currentLevel["3w"].recent.map((a) => a.stravaId)).toEqual(["1"]);
+    expect(data.currentLevel["8w"].recent.map((a) => a.stravaId)).toEqual(["1", "2"]);
+  });
+
+  test("a longer activity that isn't a run is not the Longest run", async () => {
+    const data = await imported([run("1", "4 nov 2026", "8000"), run("2", "3 nov 2026", "20000", { type: "Senderismo" })]);
+    expect(data.currentLevel["8w"].longestRun?.distanceM).toBe(8000);
+  });
+});
+
+describe("race cards", () => {
+  const race = (id: string, distance: string, row: Row = {}): Row => ({
+    id,
+    title: `Race ${id}`,
+    date: `${Number(id)} oct 2026, 10:00:00`,
+    tags: "race",
+    distance,
+    moving: "1500",
+    ...row,
+  });
+
+  test.each([
+    ["fastest5kRace", "4900"],
+    ["fastest5kRace", "5600"],
+    ["fastest7kRace", "6400"],
+    ["fastest7kRace", "7700"],
+    ["fastest10kRace", "9900"],
+    ["fastest10kRace", "10500"],
+  ] as const)("%s takes a race of %s m", async (card, distance) => {
+    const data = await imported([race("1", distance)]);
+    expect(data.allTime[card]?.title).toBe("Race 1");
+  });
+
+  test.each([
+    ["4899"],
+    ["5601"],
+    ["6399"],
+    ["7701"],
+    ["9899"],
+    ["10501"],
+  ])("a race of %s m is outside every Race distance", async (distance) => {
+    const data = await imported([race("1", distance)]);
+    expect(data.allTime).toMatchObject({ fastest5kRace: null, fastest7kRace: null, fastest10kRace: null });
+  });
+
+  test("ranks by moving pace, not time, within a Race distance", async () => {
+    const data = await imported([
+      race("1", "4900", { title: "Quicker time", moving: "1470" }), // 5:00 /km
+      race("2", "5600", { title: "Quicker pace", moving: "1540" }), // 4:35 /km
+    ]);
+    expect(data.allTime.fastest5kRace?.title).toBe("Quicker pace");
+  });
+
+  test("a faster race in another Race distance doesn't count", async () => {
+    const data = await imported([
+      race("1", "5000", { title: "5K", moving: "1000" }),
+      race("2", "10000", { title: "10K", moving: "3000" }),
+    ]);
+    expect(data.allTime.fastest5kRace?.title).toBe("5K");
+    expect(data.allTime.fastest10kRace?.title).toBe("10K");
+  });
+
+  test("a faster run that isn't a race doesn't count", async () => {
+    const data = await imported([race("1", "5000"), race("2", "5000", { tags: "running", moving: "1000" })]);
+    expect(data.allTime.fastest5kRace?.title).toBe("Race 1");
+  });
+
+  test("are all-time, ignoring the selected period", async () => {
+    const data = await imported([{ id: "9", date: "4 nov 2026, 10:00:00" }, race("1", "5000", { date: "4 nov 2020, 10:00:00" })]);
+    expect(data.allTime.fastest5kRace?.date).toBe("2020-11-04");
+  });
+
+  test("carry the date, distance, time, pace and time stopped", async () => {
+    const data = await imported([race("7", "5000", { elapsed: "1590", moving: "1500" })]);
+    expect(data.allTime.fastest5kRace).toMatchObject({
+      stravaId: "7",
+      title: "Race 7",
+      date: "2026-10-07",
+      distanceM: 5000,
+      movingS: 1500,
+      paceSPerKm: 300,
+      stoppedS: 90,
     });
   });
 });

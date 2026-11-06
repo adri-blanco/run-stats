@@ -18,7 +18,7 @@ export type TimeAtBpm = Record<string, number>;
 
 export type BestEffort = { distanceM: number; seconds: number; startOffsetS: number };
 
-export type StoredActivity = Pick<NewActivity, "startUtc" | "type" | "title" | "tags" | "distanceM" | "movingS"> & {
+export type StoredActivity = Pick<NewActivity, "startUtc" | "type" | "title" | "tags" | "distanceM" | "elapsedS" | "movingS"> & {
   id: number;
   stravaId: string | null;
   source: string;
@@ -108,7 +108,7 @@ export async function withStore<T>(path: string, use: (store: Store) => Promise<
           db
             .query(
               `SELECT id, strava_id AS stravaId, source, start_utc AS startUtc, type, title, tags,
-                      distance_m AS distanceM, moving_s AS movingS, time_at_bpm AS timeAtBpm,
+                      distance_m AS distanceM, elapsed_s AS elapsedS, moving_s AS movingS, time_at_bpm AS timeAtBpm,
                       (SELECT json_group_object(CAST(distance_m AS TEXT), seconds) FROM best_effort WHERE activity_id = activity.id) AS bestEfforts
                FROM activity ORDER BY start_utc DESC`,
             )

@@ -16,7 +16,7 @@ function duration(seconds: number): string {
 
 // Shorter than the table's durations: 25:19, not 0:25:19.
 const effort = (seconds: number | null) => (seconds === null ? "–" : duration(seconds).replace(/^0:0?/, ""));
-const km = (metres: number | null) => (metres === null ? "–" : (metres / 1000).toFixed(1));
+const km = (run: ActivityRow | null) => (run === null ? "–" : (run.distanceM / 1000).toFixed(1));
 
 function big(value: string, label: string, line: string): HTMLElement {
   return el("div", "big", el("b", "num", value), el("span", "", label), el("small", "", line));
@@ -27,7 +27,7 @@ function bigNumbers(level: CurrentLevel): HTMLElement[] {
     big(effort(level.best5k), "best 5K", `all-time ${effort(allTime.best5k)}`),
     big(effort(level.best10k), "best 10K", `all-time ${effort(allTime.best10k)}`),
     big(effort(level.best1k), "best 1K", `all-time ${effort(allTime.best1k)}`),
-    big(km(level.longestRunM), "km longest run", `all-time ${km(allTime.longestRunM)} km`),
+    big(km(level.longestRun), "km longest run", `all-time ${km(allTime.longestRun)} km`),
     big(String(level.longRuns), "long runs", `in ${level.weeksWithLongRun} of ${level.weeks} weeks`),
   ];
 }
@@ -36,6 +36,32 @@ type Rows = [label: string, value: string][];
 
 function rows(list: Rows): HTMLElement[] {
   return list.map(([label, value]) => el("div", "", el("span", "", label), el("b", "", value)));
+}
+
+function card(heading: string, a: ActivityRow | null): HTMLElement {
+  if (!a) return el("div", "", el("h3", "", heading), el("small", "", "–"));
+  const facts: Rows = [
+    ["Distance", `${km(a)} km`],
+    ["Time", effort(a.movingS)],
+    ["Pace", a.paceSPerKm === null ? "–" : `${pace(a.paceSPerKm)} /km`],
+    ["Time stopped", effort(a.stoppedS)],
+  ];
+  return el(
+    "div",
+    "",
+    el("h3", "", heading),
+    el("div", "race", el("b", "", activityLink(a)), el("small", "", a.date)),
+    el("div", "lvl num", ...rows(facts)),
+  );
+}
+
+function cards(level: CurrentLevel): HTMLElement[] {
+  return [
+    card("Fastest 5K race", allTime.fastest5kRace),
+    card("Fastest 7K race", allTime.fastest7kRace),
+    card("Fastest 10K race", allTime.fastest10kRace),
+    card("Longest run", level.longestRun),
+  ];
 }
 
 function hoursMinutes(seconds: number): string {
@@ -50,7 +76,7 @@ function change(percent: number): string {
 function volume(level: CurrentLevel): HTMLElement[] {
   const compared: Rows = level.weeklyDistanceChangePct === null ? [] : [["vs previous period", change(level.weeklyDistanceChangePct)]];
   return rows([
-    ["Weekly distance", `${km(level.weeklyDistanceM)} km`],
+    ["Weekly distance", `${(level.weeklyDistanceM / 1000).toFixed(1)} km`],
     ...compared,
     ["Total distance", `${(level.totalDistanceM / 1000).toFixed(0)} km`],
     ["Time running", hoursMinutes(level.timeRunningS)],
@@ -94,12 +120,16 @@ function rightNow(): HTMLElement[] {
   const numbers = el("div", "huge");
   const volumeRows = el("div", "lvl num");
   const consistencyRows = el("div", "lvl num");
+  const raceCards = el("div", "contents");
+  const recent = el("tbody", "");
   const shown: { period: Period; basis: StreakBasis } = { period: "8w", basis: "runs" };
   const draw = () => {
     const level = currentLevel[shown.period];
     numbers.replaceChildren(...bigNumbers(level));
     volumeRows.replaceChildren(...volume(level));
     consistencyRows.replaceChildren(...consistency(level, shown.basis));
+    raceCards.replaceChildren(...cards(level));
+    recent.replaceChildren(...level.recent.map(row));
   };
   const periods: [Period, string][] = [["3w", "3 wk"], ["8w", "8 wk"], ["3m", "3 mo"], ["1y", "1 yr"], ["all", "All"]];
   const periodSelector = segmented("Period", periods, shown.period, (period) => {
@@ -110,15 +140,19 @@ function rightNow(): HTMLElement[] {
     shown.basis = basis;
     draw();
   });
+  const labels = el("tr", "", ...COLUMNS.map(({ label }) => el("th", "", label)));
   return [
     el("div", "now", el("h2", "", "Right now"), periodSelector),
     numbers,
     el(
       "div",
       "groups",
-      el("div", "", el("div", "head", el("h3", "", "Volume")), volumeRows),
+      el("div", "", el("h3", "", "Volume"), volumeRows),
       el("div", "", el("div", "head", el("h3", "", "Consistency"), streakSelector), consistencyRows),
+      raceCards,
     ),
+    el("h3", "recent", "Recent activities"),
+    el("table", "acts", el("thead", "", labels), recent),
   ];
 }
 
