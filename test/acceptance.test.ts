@@ -1,0 +1,34 @@
+// Local acceptance test: data/ is git-ignored, so it skips on a clean clone.
+import { afterAll, expect, test } from "bun:test";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { importExport } from "../src/commands";
+
+const ZIP = "data/strava-export/export_108516943.zip";
+const dir = mkdtempSync(join(tmpdir(), "run-stats-acceptance-"));
+
+afterAll(() => rmSync(dir, { recursive: true, force: true }));
+
+test.skipIf(!existsSync(ZIP))("imports the real Bulk export", async () => {
+  const lines: string[] = [];
+  const deps = {
+    dbPath: join(dir, "real.sqlite"),
+    outPath: join(dir, "dashboard.html"),
+    settingsPath: "settings.json",
+    now: () => new Date(),
+    log: (line: string) => void lines.push(line),
+  };
+  await importExport(ZIP, deps);
+  // The second run overwrites every row, so it proves a repeat import of the same export is safe.
+  const status = await importExport(ZIP, deps);
+
+  if (!status.ok) throw new Error(status.error);
+  expect(status.data.activities).toHaveLength(289);
+  expect(status.data.activities.filter((a) => a.type === "run")).toHaveLength(200);
+  expect(status.data.activities.filter((a) => a.avgHr !== null)).toHaveLength(192);
+  expect(status.data.activities.filter((a) => a.race)).toHaveLength(17);
+  // The 25:19 is the accepted false best from Coruña 21, see the spec's Further Notes.
+  expect(status.data.allTime).toMatchObject({ best5k: 25 * 60 + 19, best1k: 4 * 60 + 13, best10k: 53 * 60 + 6 });
+  expect(lines).toEqual(Array(2).fill("Imported 289 activities and 289 files"));
+}, 120_000); // two imports of the real export parse every file twice

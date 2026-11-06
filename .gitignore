@@ -4,3 +4,4 @@ data/
 *.db
 dist/
 node_modules/
+*.zip
