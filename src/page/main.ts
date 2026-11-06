@@ -158,7 +158,7 @@ function rightNow(): HTMLElement[] {
       "div",
       "groups",
       el("div", "", el("h3", "", "Volume"), volumeRows),
-      el("div", "", el("div", "head", el("h3", "", "Consistency"), streakSelector), consistencyRows),
+      el("div", "", el("h3", "", "Consistency"), consistencyRows, streakSelector),
       raceCards,
     ),
     el("h3", "recent", "Recent activities"),
@@ -302,6 +302,8 @@ const VIOLET = "#5b3fd6";
 const PINK = "#e0257f";
 // One width for every chart, so their plots start at the same x and the time axes line up.
 const Y_AXIS_WIDTH = 64;
+// beforeprint still runs in the screen layout, so charts get A4's width less margins and the title column.
+const PRINT_CHART_WIDTH = 543;
 const HALF_MARATHON_KM = 21.1;
 const ZONE_COLORS = ["#cfd8e3", "#8fc1a9", "#efcf6b", "#e8964e", "#c8421f"];
 
@@ -475,7 +477,8 @@ function trendChart(def: TrendChart, canvas: HTMLCanvasElement): Chart {
         tooltip: {
           callbacks: {
             title: ([item]) => `${item!.label.length > 7 ? "Week of " : ""}${item!.label}`,
-            label: def.tooltip,
+            // Index mode also hands over bars from empty buckets.
+            label: (item) => (item.parsed.y === null ? "" : def.tooltip(item)),
           },
         },
       },
@@ -576,6 +579,17 @@ function theStorySoFar(): HTMLElement[] {
     });
     story.draw();
   });
+  const allAchievements = el("details", "", summary, list) as HTMLDetailsElement;
+  let openOnScreen = false;
+  addEventListener("beforeprint", () => {
+    openOnScreen = allAchievements.open;
+    allAchievements.open = true;
+    charts.forEach((chart) => chart.resize(PRINT_CHART_WIDTH, chart.height));
+  });
+  addEventListener("afterprint", () => {
+    allAchievements.open = openOnScreen;
+    charts.forEach((chart) => chart.resize());
+  });
   return [
     el("h2", "story", "The story so far"),
     el("small", "", "Grey area: phone era, no heart rate."),
@@ -590,7 +604,7 @@ function theStorySoFar(): HTMLElement[] {
         el("div", "chartbox", canvases[i]!),
       ),
     ),
-    el("details", "", summary, list),
+    allAchievements,
   ];
 }
 
@@ -613,11 +627,15 @@ document.getElementById("app")!.append(
     "div",
     "content",
     ...theStorySoFar(),
-    el("h2", "story", "All activities"),
-    el("div", "filters", typeFilter, markFilter, sessionFilter, yearFilter, search),
-    count,
-    el("table", "acts", el("thead", "", el("tr", "", ...headers)), body),
-    more,
+    el(
+      "div",
+      "all",
+      el("h2", "story", "All activities"),
+      el("div", "filters", typeFilter, markFilter, sessionFilter, yearFilter, search),
+      count,
+      el("table", "acts", el("thead", "", el("tr", "", ...headers)), body),
+      more,
+    ),
   ),
 );
 

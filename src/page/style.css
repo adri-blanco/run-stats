@@ -61,7 +61,7 @@ small{color:var(--mute)}
 @media (max-width:1000px){.huge{grid-template-columns:repeat(3,1fr)}}
 @media (max-width:560px){.huge{grid-template-columns:1fr 1fr}.big:last-child{grid-column:span 2}}
 .contents{display:contents}
-.groups .head{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:0 8px}
+.lvl+.seg{margin-top:10px}
 .groups .seg button{padding:1px 7px;font-size:11px}
 .lvl b{white-space:nowrap}
 .more{all:unset;display:inline-block;cursor:pointer;margin-top:10px;padding:4px 12px;border:1px solid var(--line);border-radius:7px;font-size:13px}
@@ -88,3 +88,16 @@ summary.story{cursor:pointer}
 .ach b{font-weight:600}
 .ach small{display:block}
 @media (max-width:700px){.detail{padding-left:0}.columns{columns:1}}
+@media (max-width:560px){.acts th:nth-child(n+3):not(:nth-child(4)),.acts td:nth-child(n+3):not(:nth-child(4)){display:none}.acts td{overflow-wrap:anywhere}}
+@page{margin:12mm}
+@media print{
+  *{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+  .seg,.filters,.detail,.all{display:none}
+  .night{padding:16px 0}
+  .night .inner{padding:0 12px}
+  .content{padding:16px 0 0}
+  .chartbox canvas{width:100%!important;height:100%!important}
+  .row,tr{break-inside:avoid}
+  .story{break-after:avoid}
+  summary.story{list-style:none}
+}
