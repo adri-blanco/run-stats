@@ -2,10 +2,10 @@ import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Encoder, Profile } from "@garmin/fitsdk";
 import { gunzipSync, gzipSync, zipSync } from "fflate";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { generate, importExport } from "../src/commands";
+import { generate, importExport, refresh } from "../src/commands";
 
 const COLUMNS = 104;
 const VALID_SETTINGS = {
@@ -107,6 +107,193 @@ beforeEach(() => {
 });
 
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+// The assumed AccessLink v3 shape, in this one place. #29 checks it against the real API.
+function polarExercise(fields: Record<string, unknown> = {}) {
+  return {
+    id: "2AC312F",
+    start_time: "2026-11-05T09:00:00",
+    start_time_utc_offset: 60,
+    duration: "PT1H2M3S",
+    distance: 12000.5,
+    sport: "RUNNING",
+    detailed_sport_info: "RUNNING",
+    ...fields,
+  };
+}
+
+const POLAR_POINTS = [{ at: 0, bpm: 100, m: 0 }, { at: 5, bpm: 120, m: 600 }, { at: 10, bpm: 140, m: 1200 }];
+const POLAR_API = "https://www.polaraccesslink.com/v3/exercises";
+
+type PolarOptions = { fitBody?: string; respond?: (url: string) => Response | undefined; requests?: string[] };
+
+function polarDeps(exercises: unknown[], { fitBody, respond, requests }: PolarOptions = {}) {
+  return {
+    ...deps(),
+    polarToken: "fake-token",
+    fetch: async (url: string, init?: RequestInit) => {
+      if (new Headers(init?.headers).get("Authorization") !== "Bearer fake-token") return new Response(null, { status: 401 });
+      requests?.push(url);
+      const response = respond?.(url);
+      if (response) return response;
+      if (url === POLAR_API) return Response.json(exercises);
+      return new Response(fitBody ?? Buffer.from(gunzipSync(fit(POLAR_POINTS))));
+    },
+  };
+}
+
+async function refreshed(exercises: unknown[], options?: PolarOptions) {
+  const status = await refresh(polarDeps(exercises, options));
+  if (!status.ok) throw new Error(status.error);
+  return status.data;
+}
+
+describe("refresh", () => {
+  test("stores a new exercise as a Provisional activity, with heart rate and best efforts from its FIT file", async () => {
+    const requests: string[] = [];
+    const data = await refreshed([polarExercise()], { requests });
+
+    expect(data.activities).toEqual([
+      {
+        stravaId: null,
+        date: "2026-11-05",
+        title: null,
+        type: "run",
+        distanceM: 12000.5,
+        movingS: 3723,
+        stoppedS: 0,
+        paceSPerKm: 3723 / 12.0005,
+        avgHr: 110,
+        maxHr: 120,
+        race: false,
+        longRun: true,
+        sessionType: null,
+        sessionDetail: null,
+      },
+    ]);
+    expect(data.allTime.best1k).toBe(10);
+    expect(data.meta.awaitingStrava).toBe(1);
+    expect(requests).toEqual([POLAR_API, `${POLAR_API}/2AC312F/fit`]);
+  });
+
+  test("uses the UTC offset only to find the start, and groups by the settings time zone", async () => {
+    const data = await refreshed([polarExercise({ start_time: "2026-11-05T22:00:00", start_time_utc_offset: -300 })]);
+    expect(data.activities[0]!.date).toBe("2026-11-06");
+  });
+
+  test("skips an exercise within 60 s of a stored activity, and adds one just outside", async () => {
+    await imported([{ date: "5 nov 2026, 8:00:30", title: "On Strava" }]);
+    const data = await refreshed([
+      polarExercise({ id: "near", start_time: "2026-11-05T08:59:30" }),
+      polarExercise({ id: "far", start_time: "2026-11-05T08:59:29" }),
+    ]);
+    expect(data.activities.map((a) => a.title)).toEqual(["On Strava", null]);
+    expect(lines).toContain("Added 1 Provisional activities");
+  });
+
+  test("a second refresh adds nothing, and the page is still regenerated", async () => {
+    await refreshed([polarExercise()]);
+    rmSync(deps().outPath);
+    const data = await refreshed([polarExercise()]);
+    expect(data.activities).toHaveLength(1);
+    expect(await Bun.file(deps().outPath).exists()).toBe(true);
+  });
+
+  test("Long run comes from distance, and Provisional runs have no Race mark or Session type", async () => {
+    const data = await refreshed([
+      polarExercise({ id: "short", distance: 9000 }),
+      polarExercise({ id: "hike", start_time: "2026-11-04T09:00:00", detailed_sport_info: "HIKING" }),
+    ]);
+    expect(data.activities.map((a) => [a.type, a.longRun, a.race, a.sessionType])).toEqual([
+      ["run", false, false, null],
+      ["hike", false, false, null],
+    ]);
+    expect(data.meta.awaitingStrava).toBe(2);
+  });
+
+  test("an unknown Polar sport becomes other and is printed", async () => {
+    const data = await refreshed([polarExercise({ sport: "OTHER", detailed_sport_info: "WATERSPORTS_WATERSKI" })]);
+    expect(data.activities[0]!.type).toBe("other");
+    expect(lines).toContain(`Unknown Polar sport "WATERSPORTS_WATERSKI" on exercise 2AC312F, stored as other`);
+  });
+
+  test("an exercise with no distance is stored with 0", async () => {
+    const { distance, ...gym } = polarExercise({ detailed_sport_info: "STRENGTH_TRAINING" });
+    const data = await refreshed([gym]);
+    expect(data.activities[0]).toMatchObject({ type: "strength", distanceM: 0 });
+  });
+
+  test("warns when the newest stored activity is over 30 days old", async () => {
+    await imported([{ date: "7 oct 2026, 9:59:59" }]);
+    await refreshed([]);
+    expect(lines.join("\n")).toContain("Warning: the newest stored activity is over 30 days old");
+  });
+
+  test("doesn't warn at exactly 30 days, or on an empty store", async () => {
+    await refreshed([]);
+    await imported([{ date: "7 oct 2026, 10:00:00" }]);
+    await refreshed([]);
+    expect(lines.join("\n")).not.toContain("30 days");
+  });
+
+  test("a missing POLAR_ACCESS_TOKEN aborts with a clear message and calls nothing", async () => {
+    const requests: string[] = [];
+    const status = await refresh({ ...polarDeps([], { requests }), polarToken: undefined });
+    expect(status).toEqual({ ok: false, error: expect.stringContaining("POLAR_ACCESS_TOKEN") });
+    expect(requests).toEqual([]);
+  });
+
+  test("an auth failure partway through aborts and stores nothing", async () => {
+    await imported([{ title: "Kept" }]);
+    const status = await refresh(
+      polarDeps(
+        [polarExercise({ id: "first" }), polarExercise({ id: "second", start_time: "2026-11-04T09:00:00" })],
+        { respond: (url) => (url.includes("second") ? new Response(null, { status: 403 }) : undefined) },
+      ),
+    );
+    expect(status).toEqual({ ok: false, error: expect.stringContaining("403") });
+    const after = await generate(deps());
+    expect(after.ok && after.data.activities.map((a) => a.title)).toEqual(["Kept"]);
+  });
+
+  test("any other failed Polar request aborts too", async () => {
+    const status = await refresh(polarDeps([], { respond: () => new Response(null, { status: 500 }) }));
+    expect(status).toEqual({ ok: false, error: expect.stringContaining("500") });
+  });
+
+  test("rolls back when the page can't be written", async () => {
+    mkdirSync(deps().outPath, { recursive: true });
+    const status = await refresh(polarDeps([polarExercise()]));
+    expect(status.ok).toBe(false);
+    rmSync(deps().outPath, { recursive: true });
+    const after = await generate(deps());
+    expect(after.ok && after.data.activities).toEqual([]);
+  });
+
+  test("an exercise that doesn't have the assumed shape aborts rather than storing wrong values", async () => {
+    const badStart = await refresh(polarDeps([polarExercise({ start_time: "2026-11-05T09:00:00Z" })]));
+    expect(badStart).toEqual({ ok: false, error: expect.stringContaining("start time") });
+    const badDuration = await refresh(polarDeps([polarExercise({ duration: 3723 })]));
+    expect(badDuration).toEqual({ ok: false, error: expect.stringContaining("duration") });
+  });
+
+  test("a corrupt FIT file keeps the summary, warns, and stays retryable", async () => {
+    const data = await refreshed([polarExercise()], { fitBody: "not a fit file" });
+    expect(data.activities[0]).toMatchObject({ distanceM: 12000.5, avgHr: null });
+    expect(lines.join("\n")).toContain("Warning");
+
+    lines.length = 0;
+    await generate(deps());
+    expect(lines.join("\n")).toContain("Warning");
+  });
+
+  test("a later Bulk export replaces a Provisional activity once", async () => {
+    await refreshed([polarExercise()]);
+    const data = await imported([{ date: "5 nov 2026, 8:00:30", title: "From Strava" }]);
+    expect(data.activities.map((a) => a.title)).toEqual(["From Strava"]);
+    expect(data.meta.awaitingStrava).toBe(0);
+  });
+});
 
 describe("importExport", () => {
   test("stores an activity from a Bulk export and returns it in the DashboardData", async () => {
@@ -416,7 +603,22 @@ describe("periods", () => {
 
   test("a period with no runs is empty", async () => {
     const data = await imported([run("1", "4 nov 2026", "0", { type: "Senderismo" })]);
-    expect(data.currentLevel["8w"]).toMatchObject({ best1k: null, best5k: null, best10k: null, longestRun: null, longRuns: 0, weeks: 8, weeksWithLongRun: 0 });
+    expect(data.currentLevel["8w"]).toMatchObject({
+      best1k: null,
+      best5k: null,
+      best10k: null,
+      longestRun: null,
+      longRuns: 0,
+      weeks: 8,
+      weeksWithLongRun: 0,
+      weeklyDistanceM: 0,
+      weeklyDistanceChangePct: null,
+      totalDistanceM: 0,
+      timeRunningS: 0,
+      runs: 0,
+      runsPerWeek: 0,
+      crossTrainingPerWeek: 0.125,
+    });
   });
 
   test("the Longest run follows the period and carries its details", async () => {
@@ -526,6 +728,139 @@ describe("race cards", () => {
       paceSPerKm: 300,
       stoppedS: 90,
     });
+  });
+});
+
+describe("Volume", () => {
+  const run = (id: string, date: string, distance: string, row: Row = {}): Row => ({ id, date: `${date}, 10:00:00`, distance, ...row });
+
+  test.each([
+    ["3w", 700, 2100, 1000], // 21 days
+    ["8w", 262.5, 2100, 1000], // 56 days
+    ["3m", 159.78261, 2100, 1000], // 92 days
+    ["1y", 40.27397, 2100, 1000], // 365 days
+    ["all", 154.91803, 8100, 7000], // 366 days
+  ] as const)("%s divides by its length in days ÷ 7, with moving time", async (period, weekly, total, moving) => {
+    const data = await imported([
+      run("1", "4 nov 2026", "2100", { moving: "1000" }),
+      run("2", "4 nov 2025", "6000", { moving: "6000" }),
+    ]);
+    expect(data.currentLevel[period].weeklyDistanceM).toBeCloseTo(weekly, 3);
+    expect(data.currentLevel[period].totalDistanceM).toBe(total);
+    expect(data.currentLevel[period].timeRunningS).toBe(moving);
+  });
+
+  test("counts runs and cross-training per week, cross-training being any non-run activity", async () => {
+    const data = await imported([
+      run("1", "4 nov 2026", "5000"),
+      run("2", "3 nov 2026", "5000"),
+      run("3", "2 nov 2026", "5000"),
+      run("4", "1 nov 2026", "0", { type: "Entrenamiento con pesas" }),
+      run("5", "31 oct 2026", "9000", { type: "Senderismo" }),
+      run("6", "30 oct 2026", "0", { type: "Yoga" }),
+      run("7", "14 oct 2026", "5000"), // the day before the 3-week period starts
+      run("8", "13 oct 2026", "0", { type: "Natación" }),
+    ]);
+    expect(data.currentLevel["3w"]).toMatchObject({ runs: 3, runsPerWeek: 1, crossTrainingPerWeek: 1, totalDistanceM: 15_000 });
+    expect(data.currentLevel["8w"]).toMatchObject({ runs: 4, runsPerWeek: 0.5, crossTrainingPerWeek: 0.5 });
+  });
+});
+
+describe("previous-period change", () => {
+  const run = (id: string, date: string, distance: string, row: Row = {}): Row => ({ id, date: `${date}, 10:00:00`, distance, ...row });
+
+  test.each([
+    ["3w", "4 nov 2026", "15 oct 2026", "14 oct 2026", "24 sept 2026", "23 sept 2026"],
+    ["8w", "4 nov 2026", "10 sept 2026", "9 sept 2026", "16 jul 2026", "15 jul 2026"],
+    ["3m", "31 may 2026", "1 mar 2026", "28 feb 2026", "29 nov 2025", "28 nov 2025"], // 92 days back, not to 1 December
+    ["1y", "4 nov 2026", "5 nov 2025", "4 nov 2025", "5 nov 2024", "4 nov 2024"],
+  ] as const)("%s compares with the same length just before it", async (period, end, first, lastBefore, firstBefore, tooEarly) => {
+    const data = await imported([
+      run("1", end, "6000"),
+      run("2", first, "6000"),
+      run("3", lastBefore, "4000"),
+      run("4", firstBefore, "4000"),
+      run("5", tooEarly, "50000"),
+    ]);
+    expect(data.currentLevel[period].weeklyDistanceChangePct).toBe(50);
+  });
+
+  test("can be a fall, and counts run distance only", async () => {
+    const data = await imported([
+      run("1", "4 nov 2026", "3000"),
+      run("2", "3 nov 2026", "90000", { type: "Senderismo" }),
+      run("3", "10 oct 2026", "4000"),
+      run("4", "9 oct 2026", "90000", { type: "Senderismo" }),
+    ]);
+    expect(data.currentLevel["3w"].weeklyDistanceChangePct).toBe(-25);
+  });
+
+  test("is null on all", async () => {
+    const data = await imported([run("1", "4 nov 2026", "5000"), run("2", "4 nov 2020", "5000")]);
+    expect(data.currentLevel.all.weeklyDistanceChangePct).toBeNull();
+  });
+
+  test("is null when the period before has no run distance to compare with", async () => {
+    const data = await imported([run("1", "4 nov 2026", "5000"), run("2", "10 oct 2026", "9000", { type: "Senderismo" })]);
+    expect(data.currentLevel["3w"].weeklyDistanceChangePct).toBeNull();
+  });
+});
+
+describe("streaks", () => {
+  const run = (id: string, date: string, row: Row = {}): Row => ({ id, date: `${date}, 10:00:00`, ...row });
+  const hike = (id: string, date: string): Row => run(id, date, { type: "Senderismo" });
+
+  test("counts consecutive weeks, ending the current one at the newest activity's week", async () => {
+    const data = await imported([
+      run("1", "4 nov 2026"),
+      run("2", "27 oct 2026"),
+      run("3", "6 oct 2026"), // a week with no activity comes after this one
+      run("4", "29 sept 2026"),
+      run("5", "22 sept 2026"),
+    ]);
+    expect(data.streaks.runs).toEqual({ current: 2, longest: 3 });
+  });
+
+  test("weeks run Monday to Sunday", async () => {
+    const sameWeek = await imported([run("1", "1 nov 2026"), run("2", "26 oct 2026")]);
+    expect(sameWeek.streaks.runs).toEqual({ current: 1, longest: 1 });
+    const nextWeek = await imported([run("1", "2 nov 2026"), run("2", "1 nov 2026")]);
+    expect(nextWeek.streaks.runs).toEqual({ current: 2, longest: 2 });
+  });
+
+  test("weeks use timeZone, not UTC", async () => {
+    const data = await imported([
+      { id: "1", date: "1 nov 2026, 23:30:00" }, // Sunday in UTC, already Monday in Madrid
+      { id: "2", date: "26 oct 2026, 10:00:00" },
+    ]);
+    expect(data.streaks.runs).toEqual({ current: 2, longest: 2 });
+  });
+
+  test("the any-activity basis counts every Activity type, the runs basis only runs", async () => {
+    const data = await imported([run("1", "4 nov 2026"), hike("2", "27 oct 2026"), run("3", "20 oct 2026")]);
+    expect(data.streaks.all).toEqual({ current: 3, longest: 3 });
+    expect(data.streaks.runs).toEqual({ current: 1, longest: 1 });
+  });
+
+  test("the runs basis ends at the newest activity of any type, so a week with only a hike breaks it", async () => {
+    const data = await imported([hike("1", "4 nov 2026"), run("2", "27 oct 2026"), run("3", "20 oct 2026")]);
+    expect(data.streaks.runs).toEqual({ current: 0, longest: 2 });
+    expect(data.streaks.all).toEqual({ current: 3, longest: 3 });
+  });
+
+  test("the output doesn't depend on the day it is generated", async () => {
+    const data = await imported([run("1", "4 ene 2024"), run("2", "28 dic 2023")]); // deps' clock is November 2026
+    expect(data.streaks.runs).toEqual({ current: 2, longest: 2 });
+  });
+
+  test("a streak carries over a year end", async () => {
+    const data = await imported([run("1", "3 ene 2021"), run("2", "28 dic 2020"), run("3", "27 dic 2020")]);
+    expect(data.streaks.runs).toEqual({ current: 2, longest: 2 });
+  });
+
+  test("are zero with no activities", async () => {
+    const status = await generate(deps());
+    expect(status.ok && status.data.streaks).toEqual({ runs: { current: 0, longest: 0 }, all: { current: 0, longest: 0 } });
   });
 });
 
@@ -922,6 +1257,7 @@ describe("generate", () => {
       timeZone: "Asia/Tokyo",
       watchEraStart: "2024-08-23",
       newestActivity: "2026-11-05",
+      awaitingStrava: 0,
     });
   });
 

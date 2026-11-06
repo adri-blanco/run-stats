@@ -1,9 +1,11 @@
 import { deriveStale } from "./derive";
 import { writeDashboard } from "./generate";
-import { readBulkExport, storeExport } from "./import";
+import { readBulkExport, readPolarExercises, storeExport, type Polar } from "./import";
 import { buildDashboardData, type DashboardData } from "./metrics";
 import { loadSettings, type Settings } from "./settings";
 import { withStore, type Store } from "./store";
+
+const POLAR_WINDOW_MS = 30 * 86_400_000;
 
 export type Deps = {
   dbPath: string;
@@ -12,6 +14,8 @@ export type Deps = {
   now: () => Date;
   log: (line: string) => void;
 };
+
+export type RefreshDeps = Deps & { fetch: Polar["fetch"]; polarToken: string | undefined };
 
 export type Status = { ok: true; data: DashboardData } | { ok: false; error: string };
 
@@ -43,6 +47,27 @@ export function importExport(zipPath: string, deps: Deps): Promise<Status> {
         return data;
       }),
     );
+  });
+}
+
+export function refresh(deps: RefreshDeps): Promise<Status> {
+  return statusOf(async () => {
+    const settings = loadSettings(deps.settingsPath);
+    const token = deps.polarToken;
+    if (!token) throw new Error("POLAR_ACCESS_TOKEN is missing: set it in .env to run refresh");
+    return withStore(deps.dbPath, async (store) => {
+      const stored = store.activities();
+      if (stored[0] && deps.now().getTime() - Date.parse(stored[0].startUtc) > POLAR_WINDOW_MS) {
+        deps.log("Warning: the newest stored activity is over 30 days old. Polar only lists the last 30 days, so a full export is needed to fill the gap");
+      }
+      const added = await readPolarExercises({ fetch: deps.fetch, token }, stored, deps.log);
+      return store.transaction(async () => {
+        store.insertAll(added);
+        const data = await publish(store, settings, deps);
+        deps.log(`Added ${added.length} Provisional activities`);
+        return data;
+      });
+    });
   });
 }
 
