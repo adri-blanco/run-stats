@@ -61,10 +61,10 @@ function card(heading: string, a: ActivityRow | null): HTMLElement {
 
 function cards(level: CurrentLevel): HTMLElement[] {
   return [
+    card("Longest run", level.longestRun),
     card("Fastest 5K race", allTime.fastest5kRace),
     card("Fastest 7K race", allTime.fastest7kRace),
     card("Fastest 10K race", allTime.fastest10kRace),
-    card("Longest run", level.longestRun),
   ];
 }
 
@@ -424,7 +424,7 @@ const TREND_CHARTS: TrendChart[] = [
       const race = (item.dataset.pointStyle as string[])[item.dataIndex] === "triangle";
       return `${item.dataset.label}: ${shortDuration(item.parsed.y)}${race ? " (race)" : ""}`;
     },
-    y: { reverse: true, ticks: { stepSize: 300, callback: (value) => shortDuration(Number(value)) } } as ScaleOptions<"linear">,
+    y: { reverse: true, ticks: { stepSize: 600, callback: (value) => shortDuration(Number(value)) } } as ScaleOptions<"linear">,
     legend: true,
     plugins: [fasterUp],
   },
@@ -555,7 +555,12 @@ function theStorySoFar(): HTMLElement[] {
         dot.style.left = `${((buckets.findLastIndex((bucket) => bucket.key <= a.date) + 0.5) / buckets.length) * 100}%`;
         dot.title = `${a.date} ${a.label}`;
         dot.setAttribute("aria-label", dot.title);
-        dot.onclick = () => detail.replaceChildren(`${a.date}: `, achievementTitle(a), " ", el("small", "num", achievementDetail(a)));
+        dot.setAttribute("aria-pressed", "false");
+        dot.onclick = () => {
+          dots.querySelector("[aria-pressed=true]")?.setAttribute("aria-pressed", "false");
+          dot.setAttribute("aria-pressed", "true");
+          detail.replaceChildren(`${a.date}: `, achievementTitle(a), " ", el("small", "num", achievementDetail(a)));
+        };
         return dot;
       }),
     );
