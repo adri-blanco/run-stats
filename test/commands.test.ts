@@ -930,6 +930,95 @@ describe("trends", () => {
   });
 });
 
+describe("heart-rate trends", () => {
+  // Each stint is [bpm, seconds], in steps of 10 s so no sample hits the cap.
+  function hrFile(stints: [number, number][]): Uint8Array {
+    const points: Point[] = [];
+    let at = 0;
+    for (const [bpm, seconds] of stints) {
+      for (let i = 0; i < seconds; i += 10, at += 10) points.push({ at, bpm });
+    }
+    return tcx([...points, { at, bpm: stints.at(-1)![0] }]);
+  }
+
+  const hrRun = (id: string, day: string, stints: [number, number][], row: Row = {}) => {
+    const file = `activities/${id}.tcx.gz`;
+    return { row: { id, date: `${day} 2026, 10:00:00`, file, ...row }, files: { [file]: hrFile(stints) } };
+  };
+
+  const importedHr = (...activities: { row: Row; files: Record<string, Uint8Array> }[]) =>
+    imported(activities.map((a) => a.row), Object.assign({}, ...activities.map((a) => a.files)));
+
+  test("time in zones covers every activity with HR, and time below Zone 1 is in no zone", async () => {
+    const data = await importedHr(
+      hrRun("1", "4 nov", [[90, 20], [100, 30], [139, 40], [180, 50]]),
+      hrRun("2", "5 nov", [[120, 100]], { type: "Senderismo" }),
+    );
+    expect(data.trends.month[0]?.zoneSeconds).toEqual([30, 140, 0, 0, 50]);
+  });
+
+  test("a zone change in settings is applied by generate with no import", async () => {
+    await importedHr(hrRun("1", "4 nov", [[130, 100]]));
+    writeFileSync(deps().settingsPath, JSON.stringify({ ...VALID_SETTINGS, hrZones: [100, 110, 120, 125, 180] }));
+
+    const status = await generate(deps());
+
+    expect(status.ok && status.data.trends.month[0]?.zoneSeconds).toEqual([0, 0, 0, 100, 0]);
+  });
+
+  test("efficiency is the mean of each run's moving metres per minute ÷ average HR", async () => {
+    const data = await importedHr(
+      hrRun("1", "2 nov", [[150, 100]], { distance: "6000", moving: "2400" }), // 150 m/min at 150 bpm: 1 m/beat
+      hrRun("2", "3 nov", [[100, 100]], { distance: "6000", moving: "1800" }), // 200 m/min at 100 bpm: 2 m/beat
+      hrRun("3", "4 nov", [[120, 100]], { type: "Senderismo", distance: "6000", moving: "6000" }),
+      { row: { id: "4", date: "5 nov 2026, 10:00:00", distance: "6000", moving: "6000" }, files: {} },
+    );
+    expect(data.trends.month[0]?.efficiency).toBe(1.5);
+  });
+
+  test("a run with HR but no distance gives no efficiency", async () => {
+    const data = await importedHr(hrRun("1", "2 nov", [[150, 100]], { distance: "0" }));
+    expect(data.trends.month[0]).toMatchObject({ efficiency: null, avgHr: 150 });
+  });
+
+  test("Zone 2 pace is the mean moving pace of runs over half their HR time in Zone 2", async () => {
+    const data = await importedHr(
+      hrRun("1", "2 nov", [[130, 60], [150, 40]], { distance: "1000", moving: "300" }),
+      hrRun("2", "3 nov", [[130, 100]], { distance: "1000", moving: "360" }),
+      hrRun("3", "4 nov", [[130, 50], [150, 50]], { distance: "1000", moving: "600" }), // exactly half
+      hrRun("4", "5 nov", [[130, 40], [90, 30], [150, 30]], { distance: "1000", moving: "600" }), // 40% of HR time, 57% of zoned time
+      hrRun("5", "6 nov", [[150, 100]], { title: "[Zone 2] easy", distance: "1000", moving: "600" }),
+      hrRun("6", "1 nov", [[130, 100]], { type: "Senderismo", distance: "1000", moving: "600" }),
+    );
+    expect(data.trends.month[0]?.zone2PaceSPerKm).toBe(330);
+  });
+
+  test("average HR is the mean of the averages of runs with HR, and non-runs add nothing", async () => {
+    const data = await importedHr(
+      hrRun("1", "2 nov", [[120, 100]]),
+      hrRun("2", "3 nov", [[160, 300]]),
+      hrRun("3", "4 nov", [[100, 100]], { type: "Senderismo" }),
+    );
+    expect(data.trends.month[0]?.avgHr).toBe(140);
+  });
+
+  test("HR values are null for a bucket with no data, not zero", async () => {
+    const data = await importedHr(
+      hrRun("1", "4 nov", [[150, 100]]),
+      { row: { id: "2", date: "4 sept 2026, 10:00:00" }, files: {} },
+    );
+    const noData = { zoneSeconds: null, efficiency: null, zone2PaceSPerKm: null, avgHr: null };
+    expect(data.trends.month[0]).toMatchObject(noData); // a run without HR
+    expect(data.trends.month[1]).toMatchObject(noData); // an empty month
+    expect(data.trends.month[2]).toMatchObject({ zone2PaceSPerKm: null }); // HR, but no Zone 2 run
+    expect(data.trends.month[2]?.avgHr).toBe(150);
+  });
+
+  test("the metadata says when the watch era starts", async () => {
+    expect((await imported([{}])).meta.watchEraStart).toBe("2024-08-23");
+  });
+});
+
 describe("a corrupt activity file", () => {
   const good = tcx([{ at: 0, bpm: 100 }, { at: 2, bpm: 100 }]);
 
@@ -1247,6 +1336,7 @@ describe("generate", () => {
     expect(status.ok && status.data.meta).toEqual({
       generatedAt: "2026-11-06T10:00:00.000Z",
       timeZone: "Asia/Tokyo",
+      watchEraStart: "2024-08-23",
       newestActivity: "2026-11-05",
       awaitingStrava: 0,
     });
