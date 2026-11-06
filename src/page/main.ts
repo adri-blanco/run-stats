@@ -1,7 +1,7 @@
 import Chart, { type ChartDataset, type Plugin, type ScaleOptions, type TooltipItem } from "chart.js/auto";
-import type { ActivityRow, CurrentLevel, DashboardData, Period, StreakBasis, TrendBucket } from "../metrics";
+import type { Achievement, ActivityRow, CurrentLevel, DashboardData, Period, StreakBasis, TrendBucket } from "../metrics";
 
-const { activities, currentLevel, allTime, streaks, trends, meta }: DashboardData = JSON.parse(document.getElementById("data")!.textContent!);
+const { activities, currentLevel, allTime, streaks, trends, achievements, meta }: DashboardData = JSON.parse(document.getElementById("data")!.textContent!);
 
 function el(tag: string, className: string, ...children: (Node | string)[]): HTMLElement {
   const node = document.createElement(tag);
@@ -119,18 +119,23 @@ function segmented<T extends string>(label: string, options: [T, string][], init
   return selector;
 }
 
+type AchievementFilter = "all" | Achievement["kind"];
+
+// The streak selector sits in Right now but also picks which streak achievements show further down.
+const story = { filter: "all" as AchievementFilter, basis: "runs" as StreakBasis, unit: "month" as keyof typeof trends, draw: () => {} };
+
 function rightNow(): HTMLElement[] {
   const numbers = el("div", "huge");
   const volumeRows = el("div", "lvl num");
   const consistencyRows = el("div", "lvl num");
   const raceCards = el("div", "contents");
   const recent = el("tbody", "");
-  const shown: { period: Period; basis: StreakBasis } = { period: "8w", basis: "runs" };
+  const shown: { period: Period } = { period: "8w" };
   const draw = () => {
     const level = currentLevel[shown.period];
     numbers.replaceChildren(...bigNumbers(level));
     volumeRows.replaceChildren(...volume(level));
-    consistencyRows.replaceChildren(...consistency(level, shown.basis));
+    consistencyRows.replaceChildren(...consistency(level, story.basis));
     raceCards.replaceChildren(...cards(level));
     recent.replaceChildren(...level.recent.map(row));
   };
@@ -139,9 +144,10 @@ function rightNow(): HTMLElement[] {
     shown.period = period;
     draw();
   });
-  const streakSelector = segmented("Streak basis", [["runs", "Runs"], ["all", "Any activity"]], shown.basis, (basis) => {
-    shown.basis = basis;
+  const streakSelector = segmented("Streak basis", [["runs", "Runs"], ["all", "Any activity"]], story.basis, (basis) => {
+    story.basis = basis;
     draw();
+    story.draw();
   });
   const awaiting = `${meta.awaitingStrava} recent ${meta.awaitingStrava === 1 ? "activity" : "activities"} awaiting Strava details`;
   const labels = el("tr", "", ...COLUMNS.map(({ label }) => el("th", "", label)));
@@ -166,9 +172,9 @@ function pace(seconds: number): string {
   return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, "0")}`;
 }
 
-function activityLink(a: ActivityRow): Node | string {
-  if (!a.stravaId) return titleOf(a);
-  const link = el("a", "", titleOf(a)) as HTMLAnchorElement;
+function activityLink(a: ActivityRow, text = titleOf(a)): Node | string {
+  if (!a.stravaId) return text;
+  const link = el("a", "", text) as HTMLAnchorElement;
   link.href = `https://www.strava.com/activities/${a.stravaId}`;
   link.target = "_blank";
   link.rel = "noopener";
@@ -499,7 +505,61 @@ function trendChart(def: TrendChart, canvas: HTMLCanvasElement): Chart {
   });
 }
 
+const ACHIEVEMENT_VALUE: Record<NonNullable<Achievement["unit"]>, (value: number) => string> = {
+  time: effort,
+  distance: (metres) => `${(metres / 1000).toFixed(1)} km`,
+  weeks: (weeks) => `${weeks} wk`,
+};
+
+function achievementDetail({ value, previous, unit, activity }: Achievement): string {
+  if (!unit) return `${km(activity)} km · ${effort(activity!.movingS)} · stopped ${effort(activity!.stoppedS)}`;
+  const text = ACHIEVEMENT_VALUE[unit];
+  return previous === null ? text(value!) : `${text(value!)}, was ${text(previous)}`;
+}
+
+const achievementTitle = (a: Achievement) => (a.activity ? activityLink(a.activity, a.label) : a.label);
+
+function achievementRow(a: Achievement): HTMLElement {
+  return el(
+    "div",
+    "ach",
+    el("span", "num", a.date),
+    el("div", "", el("b", "", achievementTitle(a)), el("span", `tag ${a.kind}`, a.kind), el("small", "num", achievementDetail(a))),
+  );
+}
+
 function theStorySoFar(): HTMLElement[] {
+  const dots = el("div", "dots");
+  // Plots start here on every chart, so a dot sits over its bucket's bar.
+  dots.style.marginLeft = `${Y_AXIS_WIDTH}px`;
+  const detail = el("div", "detail");
+  const summary = el("summary", "story");
+  const list = el("div", "columns");
+  story.draw = () => {
+    const buckets = trends[story.unit];
+    const shown = achievements.filter(
+      (a) => (story.filter === "all" || a.kind === story.filter) && (a.kind !== "streak" || a.streakBasis === story.basis),
+    );
+    detail.replaceChildren(el("small", "", "Select a dot to see the achievement."));
+    dots.replaceChildren(
+      ...shown.map((a) => {
+        const dot = el("button", `dot ${a.kind}`);
+        dot.style.left = `${((buckets.findLastIndex((bucket) => bucket.key <= a.date) + 0.5) / buckets.length) * 100}%`;
+        dot.title = `${a.date} ${a.label}`;
+        dot.setAttribute("aria-label", dot.title);
+        dot.onclick = () => detail.replaceChildren(`${a.date}: `, achievementTitle(a), " ", el("small", "num", achievementDetail(a)));
+        return dot;
+      }),
+    );
+    summary.textContent = `All ${shown.length} achievements`;
+    list.replaceChildren(...shown.map(achievementRow));
+  };
+  const filters: [AchievementFilter, string][] = [["all", "All"], ["record", "Records"], ["race", "Races"], ["first", "Firsts"], ["streak", "Streaks"]];
+  const filter = segmented("Achievements", filters, story.filter, (kind) => {
+    story.filter = kind;
+    story.draw();
+  });
+  const legend = (["race", "record", "first", "streak"] as const).flatMap((kind) => [el("span", `key ${kind}`, "●"), ` ${kind} `]);
   const options: [keyof typeof trends, string][] = [["month", "Monthly"], ["week", "Weekly"]];
   const canvases = TREND_CHARTS.map((def) => {
     const canvas = el("canvas", "") as HTMLCanvasElement;
@@ -508,16 +568,20 @@ function theStorySoFar(): HTMLElement[] {
     return canvas;
   });
   const charts = TREND_CHARTS.map((def, i) => trendChart(def, canvases[i]!));
-  const selector = segmented("Chart period", options, "month", (unit) => {
+  const selector = segmented("Chart period", options, story.unit, (unit) => {
+    story.unit = unit;
     charts.forEach((chart, i) => {
       chart.data = { labels: trends[unit].map((bucket) => bucket.key), datasets: TREND_CHARTS[i]!.datasets(trends[unit]) };
       chart.update();
     });
+    story.draw();
   });
   return [
     el("h2", "story", "The story so far"),
     el("small", "", "Grey area: phone era, no heart rate."),
-    el("div", "filters", selector),
+    el("div", "filters", filter, selector),
+    el("div", "row", el("h3", "", "Achievements", el("small", "", ...legend)), dots),
+    detail,
     ...TREND_CHARTS.map((def, i) =>
       el(
         "div",
@@ -526,6 +590,7 @@ function theStorySoFar(): HTMLElement[] {
         el("div", "chartbox", canvases[i]!),
       ),
     ),
+    el("details", "", summary, list),
   ];
 }
 
