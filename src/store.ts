@@ -1,10 +1,12 @@
 import { Database } from "bun:sqlite";
 
+export type ActivityType = "run" | "hike" | "strength" | "workout" | "swim" | "kayak" | "football" | "other";
+
 export type NewActivity = {
   stravaId: string | null;
   source: "strava" | "polar";
   startUtc: string;
-  type: string;
+  type: ActivityType;
   title: string | null;
   tags: string;
   elapsedS: number;
@@ -18,22 +20,21 @@ export type TimeAtBpm = Record<string, number>;
 
 export type BestEffort = { distanceM: number; seconds: number; startOffsetS: number };
 
-export type StoredActivity = Pick<NewActivity, "startUtc" | "type" | "title" | "tags" | "distanceM" | "elapsedS" | "movingS"> & {
+export type StoredActivity = Pick<NewActivity, "stravaId" | "source" | "startUtc" | "type" | "title" | "tags" | "distanceM" | "elapsedS" | "movingS"> & {
   id: number;
-  stravaId: string | null;
-  source: string;
   timeAtBpm: TimeAtBpm | null;
   // Seconds per distance in metres, a string key for the same reason as TimeAtBpm.
   bestEfforts: Record<string, number>;
 };
 
-export type StaleFile = { id: number; startUtc: string; type: string; format: string; gz: Uint8Array };
+export type StaleFile = { id: number; startUtc: string; type: ActivityType; format: string; gz: Uint8Array };
 
 export type Store = {
   transaction<T>(run: () => Promise<T>): Promise<T>;
   insertAll(activities: NewActivity[]): void;
   remove(ids: number[]): void;
   activities(): StoredActivity[];
+  file(id: number): NewActivity["file"];
   staleFiles(version: number): StaleFile[];
   saveDerived(id: number, timeAtBpm: TimeAtBpm | null, efforts: BestEffort[], version: number): void;
 };
@@ -118,6 +119,7 @@ export async function withStore<T>(path: string, use: (store: Store) => Promise<
           timeAtBpm: a.timeAtBpm === null ? null : JSON.parse(a.timeAtBpm),
           bestEfforts: JSON.parse(a.bestEfforts),
         })),
+      file: (id) => db.query("SELECT format, file_gz AS gz FROM activity_file WHERE activity_id = ?").get(id) as NewActivity["file"],
       staleFiles: (version) =>
         db
           .query(

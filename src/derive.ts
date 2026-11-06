@@ -1,6 +1,7 @@
 import { Decoder, Stream } from "@garmin/fitsdk";
 import { XMLParser, XMLValidator } from "fast-xml-parser";
 import { gunzipSync } from "fflate";
+import { errorMessage } from "./errors";
 import type { BestEffort, Store, TimeAtBpm } from "./store";
 
 // Bump when parsing or derivation changes: generate then re-derives every older row from its stored file.
@@ -116,8 +117,7 @@ export function deriveStale(store: Store, log: (line: string) => void): void {
     try {
       samples = readSamples(format, gz);
     } catch (error) {
-      const reason = error instanceof Error ? error.message : error;
-      log(`Warning: can't read the ${format} file of the activity from ${startUtc}: ${reason}`);
+      log(`Warning: can't read the ${format} file of the activity from ${startUtc}: ${errorMessage(error)}`);
       store.saveDerived(id, null, [], 0);
       continue;
     }

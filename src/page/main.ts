@@ -16,7 +16,7 @@ function duration(seconds: number): string {
 }
 
 // Shorter than the table's durations: 25:19, not 0:25:19.
-const effort = (seconds: number | null) => (seconds === null ? "–" : duration(seconds).replace(/^0:0?/, ""));
+const shortDuration = (seconds: number | null) => (seconds === null ? "–" : duration(seconds).replace(/^0:0?/, ""));
 const km = (run: ActivityRow | null) => (run === null ? "–" : (run.distanceM / 1000).toFixed(1));
 
 const titleOf = (a: ActivityRow) => a.title ?? `${a.type[0]!.toUpperCase()}${a.type.slice(1)}, from Polar`;
@@ -27,9 +27,9 @@ function big(value: string, label: string, line: string): HTMLElement {
 
 function bigNumbers(level: CurrentLevel): HTMLElement[] {
   return [
-    big(effort(level.best5k), "best 5K", `all-time ${effort(allTime.best5k)}`),
-    big(effort(level.best10k), "best 10K", `all-time ${effort(allTime.best10k)}`),
-    big(effort(level.best1k), "best 1K", `all-time ${effort(allTime.best1k)}`),
+    big(shortDuration(level.best5k), "best 5K", `all-time ${shortDuration(allTime.best5k)}`),
+    big(shortDuration(level.best10k), "best 10K", `all-time ${shortDuration(allTime.best10k)}`),
+    big(shortDuration(level.best1k), "best 1K", `all-time ${shortDuration(allTime.best1k)}`),
     big(km(level.longestRun), "km longest run", `all-time ${km(allTime.longestRun)} km`),
     big(String(level.longRuns), "long runs", `in ${level.weeksWithLongRun} of ${level.weeks} weeks`),
   ];
@@ -45,9 +45,9 @@ function card(heading: string, a: ActivityRow | null): HTMLElement {
   if (!a) return el("div", "", el("h3", "", heading), el("small", "", "–"));
   const facts: Rows = [
     ["Distance", `${km(a)} km`],
-    ["Time", effort(a.movingS)],
+    ["Time", shortDuration(a.movingS)],
     ["Pace", a.paceSPerKm === null ? "–" : `${pace(a.paceSPerKm)} /km`],
-    ["Time stopped", effort(a.stoppedS)],
+    ["Time stopped", shortDuration(a.stoppedS)],
   ];
   return el(
     "div",
@@ -162,7 +162,7 @@ function rightNow(): HTMLElement[] {
       raceCards,
     ),
     el("h3", "recent", "Recent activities"),
-    el("table", "acts", el("thead", "", labels), recent),
+    el("div", "scroll", el("table", "acts", el("thead", "", labels), recent)),
     ...(meta.awaitingStrava ? [el("small", "awaiting", awaiting)] : []),
   ];
 }
@@ -226,10 +226,14 @@ function compare(a: Value, b: Value): number {
   return order * view.direction;
 }
 
-function select(label: string, values: string[]): HTMLSelectElement {
-  const node = el("select", "", el("option", "", label), ...values.map((v) => el("option", "", v))) as HTMLSelectElement;
+function select(label: string, values: string[], texts = values): HTMLSelectElement {
+  const options = ["", ...values].map((value, i) => {
+    const option = el("option", "", [label, ...texts][i]!) as HTMLOptionElement;
+    option.value = value;
+    return option;
+  });
+  const node = el("select", "", ...options) as HTMLSelectElement;
   node.setAttribute("aria-label", label);
-  (node.firstChild as HTMLOptionElement).value = "";
   node.addEventListener("change", refilter);
   return node;
 }
@@ -238,7 +242,7 @@ const distinct = (value: (a: ActivityRow) => string | null) =>
   [...new Set(activities.map(value))].filter((v) => v !== null);
 
 const typeFilter = select("Any type", distinct((a) => a.type));
-const markFilter = select("Any mark", ["Races", "Long runs"]);
+const markFilter = select("Any mark", ["race", "longRun"], ["Races", "Long runs"]);
 const sessionFilter = select("Any session type", distinct((a) => a.sessionType).sort());
 const yearFilter = select("Any year", distinct((a) => a.date.slice(0, 4)));
 const search = el("input", "") as HTMLInputElement;
@@ -250,7 +254,7 @@ search.addEventListener("input", refilter);
 function matches(a: ActivityRow): boolean {
   return (
     (!typeFilter.value || a.type === typeFilter.value) &&
-    (!markFilter.value || (markFilter.value === "Races" ? a.race : a.longRun)) &&
+    (!markFilter.value || (markFilter.value === "race" ? a.race : a.longRun)) &&
     (!sessionFilter.value || a.sessionType === sessionFilter.value) &&
     (!yearFilter.value || a.date.startsWith(yearFilter.value)) &&
     titleOf(a).toLowerCase().includes(search.value.toLowerCase())
@@ -417,9 +421,9 @@ const TREND_CHARTS: TrendChart[] = [
     datasets: (buckets) => [effortLine(buckets, "5K", "best5k", VIOLET), effortLine(buckets, "10K", "best10k", PINK)],
     tooltip: (item) => {
       const race = (item.dataset.pointStyle as string[])[item.dataIndex] === "triangle";
-      return `${item.dataset.label}: ${effort(item.parsed.y)}${race ? " (race)" : ""}`;
+      return `${item.dataset.label}: ${shortDuration(item.parsed.y)}${race ? " (race)" : ""}`;
     },
-    y: { reverse: true, ticks: { stepSize: 300, callback: (value) => effort(Number(value)) } } as ScaleOptions<"linear">,
+    y: { reverse: true, ticks: { stepSize: 300, callback: (value) => shortDuration(Number(value)) } } as ScaleOptions<"linear">,
     legend: true,
     plugins: [fasterUp],
   },
@@ -509,13 +513,13 @@ function trendChart(def: TrendChart, canvas: HTMLCanvasElement): Chart {
 }
 
 const ACHIEVEMENT_VALUE: Record<NonNullable<Achievement["unit"]>, (value: number) => string> = {
-  time: effort,
+  time: shortDuration,
   distance: (metres) => `${(metres / 1000).toFixed(1)} km`,
   weeks: (weeks) => `${weeks} wk`,
 };
 
 function achievementDetail({ value, previous, unit, activity }: Achievement): string {
-  if (!unit) return `${km(activity)} km · ${effort(activity!.movingS)} · stopped ${effort(activity!.stoppedS)}`;
+  if (!unit) return `${km(activity)} km · ${shortDuration(activity!.movingS)} · stopped ${shortDuration(activity!.stoppedS)}`;
   const text = ACHIEVEMENT_VALUE[unit];
   return previous === null ? text(value!) : `${text(value!)}, was ${text(previous)}`;
 }
@@ -608,7 +612,6 @@ function theStorySoFar(): HTMLElement[] {
   ];
 }
 
-const runs = activities.filter((a) => a.type === "run").length;
 const range = activities.length ? `, ${activities.at(-1)!.date} to ${activities[0]!.date}` : "";
 
 document.getElementById("app")!.append(
@@ -619,7 +622,7 @@ document.getElementById("app")!.append(
       "div",
       "inner",
       el("h1", "", "Adri's running"),
-      el("small", "", `${runs} runs and ${activities.length - runs} other sessions${range}`),
+      el("small", "", `${meta.runs} runs and ${meta.otherActivities} other activities${range}`),
       ...rightNow(),
     ),
   ),
@@ -633,7 +636,7 @@ document.getElementById("app")!.append(
       el("h2", "story", "All activities"),
       el("div", "filters", typeFilter, markFilter, sessionFilter, yearFilter, search),
       count,
-      el("table", "acts", el("thead", "", el("tr", "", ...headers)), body),
+      el("div", "scroll", el("table", "acts", el("thead", "", el("tr", "", ...headers)), body)),
       more,
     ),
   ),

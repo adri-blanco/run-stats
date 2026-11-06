@@ -337,7 +337,7 @@ describe("importExport", () => {
     ["Fútbol", "football"],
   ])("maps the Activity type %s to %s", async (strava, type) => {
     const data = await imported([{ type: strava }]);
-    expect(data.activities[0]!.type).toBe(type);
+    expect<string>(data.activities[0]!.type).toBe(type);
     expect(lines.join("\n")).not.toContain(strava);
   });
 
@@ -983,11 +983,27 @@ describe("achievements", () => {
       ]);
     });
 
-    test("record months are by run distance, dated near the month's end, with no activity", async () => {
-      const data = await imported([on("3", "5 nov 2026", 7), on("2", "20 oct 2026", 8), on("1", "20 sept 2026", 6)]);
-      expect(of(data, "record", "Record month")).toEqual([
-        { kind: "record", date: "2026-10-28", label: "Record month", value: 8000, previous: 6000, unit: "distance", activity: null },
+    test("record months are by run distance, dated by the month's last run, with no activity", async () => {
+      const data = await imported([
+        on("5", "5 nov 2026", 7),
+        on("4", "30 oct 2026", 1, { type: "Senderismo" }), // later than the last run, but no run
+        on("3", "20 oct 2026", 4),
+        on("2", "3 oct 2026", 4),
+        on("1", "20 sept 2026", 6),
       ]);
+      expect(of(data, "record", "Record month")).toEqual([
+        { kind: "record", date: "2026-10-20", label: "Record month", value: 8000, previous: 6000, unit: "distance", activity: null },
+      ]);
+    });
+
+    test("a record in the newest month isn't dated after the newest activity", async () => {
+      const data = await imported([on("2", "2 nov 2026", 8), on("1", "20 oct 2026", 6)]);
+      expect(of(data, "record", "Record month").map((a) => a.date)).toEqual(["2026-11-02"]);
+    });
+
+    test("a record month's date holds for a last run after the 28th", async () => {
+      const data = await imported([on("2", "31 oct 2026", 8), on("1", "20 sept 2026", 6)]);
+      expect(of(data, "record", "Record month").map((a) => a.date)).toEqual(["2026-10-31"]);
     });
 
     test("the longest run gets an entry only when beaten, with its new and old value", async () => {
@@ -1097,7 +1113,7 @@ describe("achievements", () => {
     });
 
     test("barriers come from Settings, and one effort can pass several", async () => {
-      writeFileSync(join(dir, "settings.json"), JSON.stringify({ ...VALID_SETTINGS, firstBarrierSeconds: { "1K": [290, 280] } }));
+      writeFileSync(join(dir, "settings.json"), JSON.stringify({ ...VALID_SETTINGS, firstBarrierSeconds: { ...VALID_SETTINGS.firstBarrierSeconds, "1K": [290, 280], "5K": [1], "10K": [1] } }));
       const data = await withEfforts([[on("1", "1 oct 2026", 6), { 1000: 270 }]]);
       expect(of(data, "first").filter((a) => a.label.includes("under")).map((a) => a.label)).toEqual(["1K under 4:50", "1K under 4:40"]);
     });
@@ -1264,6 +1280,39 @@ describe("importing a later Bulk export", () => {
     expect(data.activities.map((a) => a.title)).toEqual(["New neighbour", "New title"]);
   });
 
+  test.each([
+    ["listed but not in the zip", { id: "1", file: "activities/1.tcx.gz" }],
+    ["blank in the CSV", { id: "1", file: "" }],
+    ["re-uploaded with a new strava_id", { id: "2", date: "4 nov 2026, 18:11:53" }],
+  ])("an overwrite whose file is %s keeps the stored file and derived values, and warns", async (_, row) => {
+    const name = "activities/1.tcx.gz";
+    await imported([{ id: "1", file: name, title: "Before" }], { [name]: tcx([{ at: 0, bpm: 100, m: 0 }, { at: 300, bpm: 100, m: 1000 }]) });
+    lines = [];
+
+    const data = await imported([{ ...row, title: "After" }]);
+
+    expect(data.activities[0]).toMatchObject({ title: "After", avgHr: 100, maxHr: 100 });
+    expect(data.allTime.best1k).toBe(300);
+    expect(lines.filter((line) => line.startsWith("Warning"))).toEqual([expect.stringContaining(`activity ${row.id}`)]);
+    expect(lines).toContain("Imported 1 activities and 0 files");
+
+    // Still stored, not just left in place once: a second file-less overwrite finds it too.
+    const again = await imported([{ ...row, title: "After" }]);
+    expect(again.activities[0]).toMatchObject({ avgHr: 100 });
+  });
+
+  test("a file in the new zip replaces the stored one", async () => {
+    const name = "activities/1.tcx.gz";
+    await imported([{ id: "1", file: name }], { [name]: tcx([{ at: 0, bpm: 100 }, { at: 2, bpm: 100 }]) });
+    const data = await imported([{ id: "1", file: name }], { [name]: tcx([{ at: 0, bpm: 150 }, { at: 2, bpm: 150 }]) });
+    expect(data.activities[0]).toMatchObject({ avgHr: 150 });
+  });
+
+  test("warns about an activity with a blank file cell", async () => {
+    await imported([{ id: "7", file: "" }]);
+    expect(lines.filter((line) => line.startsWith("Warning"))).toEqual([expect.stringContaining("activity 7")]);
+  });
+
   test("deletes and prints a Strava activity missing from the export", async () => {
     await imported([
       { id: "1", date: "1 ene 2025, 10:00:00", title: "Removed on Strava" },
@@ -1283,14 +1332,16 @@ describe("importing a later Bulk export", () => {
 
   test("imports the same export twice without changing or printing anything", async () => {
     const rows = [
-      { id: "1", date: "1 ene 2025, 10:00:00", title: "One" },
-      { id: "2", date: "1 ene 2025, 10:00:30", title: "Two" },
+      { id: "1", date: "1 ene 2025, 10:00:00", title: "One", file: "activities/1.tcx.gz" },
+      { id: "2", date: "1 ene 2025, 10:00:30", title: "Two", file: "activities/2.tcx.gz" },
     ];
-    const first = await imported(rows);
+    const file = tcx([{ at: 0, bpm: 100 }, { at: 2, bpm: 100 }]);
+    const files = { "activities/1.tcx.gz": file, "activities/2.tcx.gz": file };
+    const first = await imported(rows, files);
     lines = [];
-    const second = await imported(rows);
+    const second = await imported(rows, files);
     expect(second.activities).toEqual(first.activities);
-    expect(lines).toEqual(["Imported 2 activities and 0 files"]);
+    expect(lines).toEqual(["Imported 2 activities and 2 files"]);
   });
 
   test.each([
@@ -1493,6 +1544,11 @@ describe("Settings", () => {
     ["hrZones", { hrZones: [100, 120, 140, 160, "180"] }],
     ["hrZones", { hrZones: [0, 120, 140, 160, 180] }],
     ["firstBarrierSeconds", { firstBarrierSeconds: undefined }],
+    ["firstBarrierSeconds", { firstBarrierSeconds: {} }],
+    ["firstBarrierSeconds", { firstBarrierSeconds: { "5K": [1800], "10K": [3600] } }],
+    ["firstBarrierSeconds", { firstBarrierSeconds: { "5K": [1800], "1K": [300] } }],
+    ["firstBarrierSeconds", { firstBarrierSeconds: { "10K": [3600], "1K": [300] } }],
+    ["firstBarrierSeconds", { firstBarrierSeconds: { ...VALID_SETTINGS.firstBarrierSeconds, "1K": ["300"] } }],
     ["firstBarrierSeconds", { firstBarrierSeconds: { "5K": [] } }],
     ["firstBarrierSeconds", { firstBarrierSeconds: { "5K": [1800, -1] } }],
   ])("a bad %s stops the build and names the setting: %j", async (name, change) => {
@@ -1500,6 +1556,11 @@ describe("Settings", () => {
     const status = await generate(deps());
     expect(status).toEqual({ ok: false, error: expect.stringContaining(name) });
     expect(await Bun.file(deps().outPath).exists()).toBe(false);
+  });
+
+  test("a distance can list as many barriers as the athlete wants", async () => {
+    withSettings({ firstBarrierSeconds: { ...VALID_SETTINGS.firstBarrierSeconds, "5K": [1800, 1700, 1600, 1500] } });
+    expect((await generate(deps())).ok).toBe(true);
   });
 
   test("a settings file that isn't JSON stops the build", async () => {
@@ -1532,6 +1593,8 @@ describe("generate", () => {
       watchEraStart: "2024-08-23",
       newestActivity: "2026-11-05",
       awaitingStrava: 0,
+      runs: 1,
+      otherActivities: 0,
     });
   });
 
@@ -1619,6 +1682,12 @@ describe("the generated Dashboard", () => {
     const html = await Bun.file(deps().outPath).text();
     expect(html).toContain("Adri's running");
     expect(html).toContain("#1b1464");
+    expect(html).toContain("other activities");
+  });
+
+  test("the metadata counts runs and other activities for the Banner", async () => {
+    const data = await imported([{ id: "1" }, { id: "2", date: "3 nov 2026, 9:00:00" }, { id: "3", date: "2 nov 2026, 9:00:00", type: "Senderismo" }]);
+    expect(data.meta).toMatchObject({ runs: 2, otherActivities: 1 });
   });
 
   test("has no external script or stylesheet URLs, even when a title tries to add one", async () => {

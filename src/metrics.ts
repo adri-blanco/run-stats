@@ -1,11 +1,11 @@
 import type { Settings } from "./settings";
-import type { StoredActivity, TimeAtBpm } from "./store";
+import type { ActivityType, StoredActivity, TimeAtBpm } from "./store";
 
 export type ActivityRow = {
   stravaId: string | null;
   date: string;
   title: string | null;
-  type: string;
+  type: ActivityType;
   distanceM: number;
   movingS: number;
   stoppedS: number;
@@ -65,7 +65,7 @@ export type Achievement = {
 };
 
 export type DashboardData = {
-  meta: { generatedAt: string; timeZone: string; watchEraStart: string; newestActivity: string | null; awaitingStrava: number };
+  meta: { generatedAt: string; timeZone: string; watchEraStart: string; newestActivity: string | null; awaitingStrava: number; runs: number; otherActivities: number };
   activities: ActivityRow[];
   currentLevel: Record<Period, CurrentLevel>;
   allTime: Bests & { fastest5kRace: ActivityRow | null; fastest7kRace: ActivityRow | null; fastest10kRace: ActivityRow | null };
@@ -85,6 +85,10 @@ const RECENT_ACTIVITIES = 8;
 const FIRST_WHOLE_KM = 11;
 const BEST_EFFORTS = [["1K", 1000], ["5K", 5000], ["10K", 10000]] as const;
 const WATCH_ERA_START = "2024-08-23";
+// Race distance bands in metres, both ends included.
+const RACE_5K = [4900, 5600] as const;
+const RACE_7K = [6400, 7700] as const;
+const RACE_10K = [9900, 10500] as const;
 
 const isoDate = (ms: number) => new Date(ms).toISOString().slice(0, 10);
 const sum = (values: number[]) => values.reduce((total, value) => total + value, 0);
@@ -165,7 +169,7 @@ function trend(
     const paced = hrRuns.filter((run) => run.row.paceSPerKm);
     buckets.push({
       key,
-      runDistanceM: distances.reduce((sum, distanceM) => sum + distanceM, 0),
+      runDistanceM: sum(distances),
       longestRunM: distances.length ? Math.max(...distances) : null,
       best5k: fastest(runs, 5000),
       best10k: fastest(runs, 10000),
@@ -181,8 +185,8 @@ function trend(
 function heartRate(timeAtBpm: TimeAtBpm | null): Pick<ActivityRow, "avgHr" | "maxHr"> {
   if (!timeAtBpm) return { avgHr: null, maxHr: null };
   const entries = Object.entries(timeAtBpm).map(([bpm, seconds]) => [Number(bpm), seconds] as const);
-  const beats = entries.reduce((sum, [bpm, seconds]) => sum + bpm * seconds, 0);
-  const total = entries.reduce((sum, [, seconds]) => sum + seconds, 0);
+  const beats = sum(entries.map(([bpm, seconds]) => bpm * seconds));
+  const total = sum(entries.map(([, seconds]) => seconds));
   return { avgHr: beats / total, maxHr: Math.max(...entries.map(([bpm]) => bpm)) };
 }
 
@@ -207,7 +211,7 @@ function lowestBy(rows: ActivityRow[], rank: (row: ActivityRow) => number): Acti
   return rows.reduce<ActivityRow | null>((best, row) => (!best || rank(row) < rank(best) ? row : best), null);
 }
 
-function fastestRace(activities: ActivityRow[], minM: number, maxM: number): ActivityRow | null {
+function fastestRace(activities: ActivityRow[], [minM, maxM]: readonly [number, number]): ActivityRow | null {
   const inBand = activities.filter((a) => a.race && a.distanceM >= minM && a.distanceM <= maxM);
   return lowestBy(inBand, (a) => a.movingS / a.distanceM);
 }
@@ -309,15 +313,16 @@ function achievements(runs: Activity[], activities: ActivityRow[], trends: Dashb
       const seconds = bestEfforts[distance];
       if (seconds === undefined) continue;
       record(`Best ${name}`, "time", seconds, row.date, row);
-      for (const barrier of barriers[name] ?? []) {
+      for (const barrier of barriers[name]) {
         if (seconds < barrier) first(`${name} under ${clock(barrier)}`, "time", seconds, row);
       }
     }
     record("Longest run", "distance", distanceM, row.date, row);
   }
   for (const { key, runDistanceM } of trends.week) record("Record week", "distance", runDistanceM, key, null);
-  // Every month has a 28th, so a month's record sorts after what happened in it.
-  for (const { key, runDistanceM } of trends.month) record("Record month", "distance", runDistanceM, `${key}-28`, null);
+  // Oldest first, so each month ends up with its last run. A month with no run can't be a record.
+  const lastRunOfMonth = new Map(runs.toReversed().map(({ row }) => [monthOf(row.date), row.date]));
+  for (const { key, runDistanceM } of trends.month) record("Record month", "distance", runDistanceM, lastRunOfMonth.get(key) ?? key, null);
   found.push(...streakRecords(runs.map((run) => run.row.date), "runs"), ...streakRecords(activities.map((a) => a.date), "all"));
   return found.toSorted((a, b) => b.date.localeCompare(a.date));
 }
@@ -360,14 +365,16 @@ export function buildDashboardData(stored: StoredActivity[], settings: Settings,
       watchEraStart: WATCH_ERA_START,
       newestActivity: activities[0]?.date ?? null,
       awaitingStrava: stored.filter((a) => a.source === "polar").length,
+      runs: runs.length,
+      otherActivities: activities.length - runs.length,
     },
     activities,
     currentLevel: Object.fromEntries(spans.map(([period, span]) => [period, currentLevel(runs, activities, span)])) as Record<Period, CurrentLevel>,
     allTime: {
       ...bests(runs),
-      fastest5kRace: fastestRace(activities, 4900, 5600),
-      fastest7kRace: fastestRace(activities, 6400, 7700),
-      fastest10kRace: fastestRace(activities, 9900, 10500),
+      fastest5kRace: fastestRace(activities, RACE_5K),
+      fastest7kRace: fastestRace(activities, RACE_7K),
+      fastest10kRace: fastestRace(activities, RACE_10K),
     },
     streaks: {
       runs: streak(runs.map((run) => run.row.date), end),

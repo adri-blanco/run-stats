@@ -1,13 +1,14 @@
 import { parse } from "csv-parse/sync";
 import { gzipSync, unzipSync, type Unzipped } from "fflate";
 import { readFileSync } from "node:fs";
-import type { NewActivity, Store, StoredActivity } from "./store";
+import { errorMessage } from "./errors";
+import type { ActivityType, NewActivity, Store, StoredActivity } from "./store";
 
 const COLUMN = { id: 0, start: 1, title: 2, type: 3, file: 12, elapsed: 15, moving: 16, distance: 17, tags: 103 };
 const SAME_ACTIVITY_MS = 60_000;
 const POLAR_EXERCISES = "https://www.polaraccesslink.com/v3/exercises";
 const SPANISH_MONTHS = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sept", "oct", "nov", "dic"];
-const ACTIVITY_TYPES: Record<string, string> = {
+const ACTIVITY_TYPES: Record<string, ActivityType> = {
   Carrera: "run",
   "Entrenamiento con pesas": "strength",
   Entrenamiento: "workout",
@@ -18,7 +19,7 @@ const ACTIVITY_TYPES: Record<string, string> = {
 };
 
 // Assumed names, which #29 checks live. A wrong guess stays visible, as other and printed.
-const POLAR_SPORTS: Record<string, string> = {
+const POLAR_SPORTS: Record<string, ActivityType> = {
   RUNNING: "run",
   ROAD_RUNNING: "run",
   TRAIL_RUNNING: "run",
@@ -29,6 +30,8 @@ const POLAR_SPORTS: Record<string, string> = {
   WATERSPORTS_KAYAKING: "kayak",
   FOOTBALL: "football",
 };
+
+const sameActivity = (a: string, b: string) => Math.abs(Date.parse(a) - Date.parse(b)) <= SAME_ACTIVITY_MS;
 
 function startUtc(cell: string): string {
   const m = cell.match(/^(\d+) (\p{L}+)\.?,? (\d{4}), (\d+):(\d+):(\d+)$/u);
@@ -44,12 +47,11 @@ function number(cell: string): number {
   return value;
 }
 
-function originalFile(zip: Unzipped, name: string, log: (line: string) => void): NewActivity["file"] {
-  if (!name) return null;
+function originalFile(zip: Unzipped, id: string, name: string, log: (line: string) => void): NewActivity["file"] {
   const bytes = zip[name];
   const format = name.match(/\.(gpx|tcx|fit)(\.gz)?$/);
   if (!bytes || !format) {
-    log(`Warning: skipped activity file ${name}, not found in the zip or not a known format`);
+    log(`Warning: no file for activity ${id}: ${name ? `${name} not found in the zip or not a known format` : "none listed in activities.csv"}`);
     return null;
   }
   return { format: format[1]!, gz: format[2] ? bytes : gzipSync(bytes) };
@@ -59,7 +61,7 @@ function readZip(zipPath: string): Unzipped {
   try {
     return unzipSync(readFileSync(zipPath));
   } catch (error) {
-    throw new Error(`Unreadable zip ${zipPath}: ${error instanceof Error ? error.message : error}`);
+    throw new Error(`Unreadable zip ${zipPath}: ${errorMessage(error)}`);
   }
 }
 
@@ -83,7 +85,7 @@ export function readBulkExport(zipPath: string, log: (line: string) => void): Ne
       elapsedS: number(row[COLUMN.elapsed]!),
       movingS: number(row[COLUMN.moving]!),
       distanceM: number(row[COLUMN.distance]!),
-      file: originalFile(zip, row[COLUMN.file]!, log),
+      file: originalFile(zip, row[COLUMN.id]!, row[COLUMN.file]!, log),
     };
   });
 }
@@ -127,7 +129,7 @@ export async function readPolarExercises(polar: Polar, stored: StoredActivity[],
   const activities: NewActivity[] = [];
   for (const exercise of exercises) {
     const start = polarStartUtc(exercise);
-    if (stored.some((row) => Math.abs(Date.parse(row.startUtc) - Date.parse(start)) <= SAME_ACTIVITY_MS)) continue;
+    if (stored.some((row) => sameActivity(row.startUtc, start))) continue;
     const sport = exercise.detailed_sport_info ?? exercise.sport;
     const type = POLAR_SPORTS[sport];
     if (!type) log(`Unknown Polar sport "${sport}" on exercise ${exercise.id}, stored as other`);
@@ -149,7 +151,6 @@ export async function readPolarExercises(polar: Polar, stored: StoredActivity[],
   return activities;
 }
 
-// shortcut: an overwrite drops the stored file if the new zip lacks it (the import warns), keep it once #18 can show it.
 export function storeExport(store: Store, activities: NewActivity[]): { missing: StoredActivity[]; kept: StoredActivity[] } {
   const stored = store.activities();
   const newest = (rows: { startUtc: string }[]) => rows.map((row) => row.startUtc).sort().at(-1) ?? "";
@@ -161,16 +162,21 @@ export function storeExport(store: Store, activities: NewActivity[]): { missing:
 
   // strava_id first, so a start-time match can't take a row that another export row owns.
   const stravaIds = new Set(activities.map((a) => a.stravaId));
-  const knownIds = new Set(stored.map((row) => row.stravaId));
+  const byStravaId = new Map(stored.map((row) => [row.stravaId, row]));
   const unmatched = stored.filter((row) => !stravaIds.has(row.stravaId!));
-  for (const a of activities.filter((a) => !knownIds.has(a.stravaId))) {
-    const match = unmatched.findIndex((row) => Math.abs(Date.parse(row.startUtc) - Date.parse(a.startUtc)) <= SAME_ACTIVITY_MS);
-    if (match >= 0) unmatched.splice(match, 1);
-  }
+  const toStore = activities.map((a) => {
+    let row = byStravaId.get(a.stravaId);
+    if (!row) {
+      const match = unmatched.findIndex((candidate) => sameActivity(candidate.startUtc, a.startUtc));
+      if (match >= 0) row = unmatched.splice(match, 1)[0];
+    }
+    // Re-inserted, so derive restores its values. An adopted Provisional row loses its Polar file instead.
+    return !a.file && row?.source === "strava" ? { ...a, file: store.file(row.id) } : a;
+  });
   const missing = unmatched.filter((row) => row.source === "strava");
 
   // Removing cascades to files and derived rows, so an overwrite can't keep stale ones.
   store.remove(stored.filter((row) => !unmatched.includes(row)).concat(missing).map((row) => row.id));
-  store.insertAll(activities);
+  store.insertAll(toStore);
   return { missing, kept: unmatched.filter((row) => row.source === "polar") };
 }

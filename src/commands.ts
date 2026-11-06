@@ -1,4 +1,5 @@
 import { deriveStale } from "./derive";
+import { errorMessage } from "./errors";
 import { writeDashboard } from "./generate";
 import { readBulkExport, readPolarExercises, storeExport, type Polar } from "./import";
 import { buildDashboardData, type DashboardData } from "./metrics";
@@ -23,7 +24,7 @@ async function statusOf(run: () => Promise<DashboardData>): Promise<Status> {
   try {
     return { ok: true, data: await run() };
   } catch (error) {
-    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    return { ok: false, error: errorMessage(error) };
   }
 }
 
