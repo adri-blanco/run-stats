@@ -40,9 +40,10 @@ export function importExport(zipPath: string, deps: Deps): Promise<Status> {
     const activities = readBulkExport(zipPath, deps.log);
     return withStore(deps.dbPath, (store) =>
       store.transaction(async () => {
-        const missing = storeExport(store, activities);
+        const { missing, kept } = storeExport(store, activities);
         const data = await publish(store, settings, deps);
         for (const row of missing) deps.log(`Deleted ${row.startUtc.slice(0, 10)} "${row.title}", missing from the export`);
+        for (const row of kept) deps.log(`Kept ${row.startUtc.slice(0, 10)} ${row.type}, Provisional and not in the export`);
         deps.log(`Imported ${activities.length} activities and ${activities.filter((a) => a.file).length} files`);
         return data;
       }),

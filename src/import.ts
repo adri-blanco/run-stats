@@ -150,7 +150,7 @@ export async function readPolarExercises(polar: Polar, stored: StoredActivity[],
 }
 
 // shortcut: an overwrite drops the stored file if the new zip lacks it (the import warns), keep it once #18 can show it.
-export function storeExport(store: Store, activities: NewActivity[]): StoredActivity[] {
+export function storeExport(store: Store, activities: NewActivity[]): { missing: StoredActivity[]; kept: StoredActivity[] } {
   const stored = store.activities();
   const newest = (rows: { startUtc: string }[]) => rows.map((row) => row.startUtc).sort().at(-1) ?? "";
   const newestStored = newest(stored.filter((row) => row.source === "strava"));
@@ -172,5 +172,5 @@ export function storeExport(store: Store, activities: NewActivity[]): StoredActi
   // Removing cascades to files and derived rows, so an overwrite can't keep stale ones.
   store.remove(stored.filter((row) => !unmatched.includes(row)).concat(missing).map((row) => row.id));
   store.insertAll(activities);
-  return missing;
+  return { missing, kept: unmatched.filter((row) => row.source === "polar") };
 }
