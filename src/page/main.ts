@@ -1,7 +1,7 @@
 import Chart, { type ChartDataset, type Plugin, type ScaleOptions, type TooltipItem } from "chart.js/auto";
-import type { ActivityRow, CurrentLevel, DashboardData, Period, TrendBucket } from "../metrics";
+import type { ActivityRow, CurrentLevel, DashboardData, Period, StreakBasis, TrendBucket } from "../metrics";
 
-const { activities, currentLevel, allTime, trends }: DashboardData = JSON.parse(document.getElementById("data")!.textContent!);
+const { activities, currentLevel, allTime, streaks, trends }: DashboardData = JSON.parse(document.getElementById("data")!.textContent!);
 
 function el(tag: string, className: string, ...children: (Node | string)[]): HTMLElement {
   const node = document.createElement(tag);
@@ -33,9 +33,15 @@ function bigNumbers(level: CurrentLevel): HTMLElement[] {
   ];
 }
 
+type Rows = [label: string, value: string][];
+
+function rows(list: Rows): HTMLElement[] {
+  return list.map(([label, value]) => el("div", "", el("span", "", label), el("b", "", value)));
+}
+
 function card(heading: string, a: ActivityRow | null): HTMLElement {
   if (!a) return el("div", "", el("h3", "", heading), el("small", "", "–"));
-  const facts: [string, string][] = [
+  const facts: Rows = [
     ["Distance", `${km(a)} km`],
     ["Time", effort(a.movingS)],
     ["Pace", a.paceSPerKm === null ? "–" : `${pace(a.paceSPerKm)} /km`],
@@ -46,7 +52,7 @@ function card(heading: string, a: ActivityRow | null): HTMLElement {
     "",
     el("h3", "", heading),
     el("div", "race", el("b", "", activityLink(a)), el("small", "", a.date)),
-    el("div", "lvl num", ...facts.map(([label, value]) => el("div", "", el("span", "", label), el("b", "", value)))),
+    el("div", "lvl num", ...rows(facts)),
   );
 }
 
@@ -59,35 +65,93 @@ function cards(level: CurrentLevel): HTMLElement[] {
   ];
 }
 
-function rightNow(): HTMLElement[] {
-  const options: [Period, string][] = [["3w", "3 wk"], ["8w", "8 wk"], ["3m", "3 mo"], ["1y", "1 yr"], ["all", "All"]];
-  const numbers = el("div", "huge");
-  const groups = el("div", "groups");
-  const recent = el("tbody", "");
-  const buttons = options.map(([period, label]) => {
-    const button = el("button", "", label);
-    button.onclick = () => select(period);
+function hoursMinutes(seconds: number): string {
+  return `${Math.floor(seconds / 3600)} h ${String(Math.floor((seconds % 3600) / 60)).padStart(2, "0")}`;
+}
+
+function change(percent: number): string {
+  const whole = Math.round(percent);
+  return `${whole > 0 ? "+" : ""}${whole}%`;
+}
+
+function volume(level: CurrentLevel): HTMLElement[] {
+  const compared: Rows = level.weeklyDistanceChangePct === null ? [] : [["vs previous period", change(level.weeklyDistanceChangePct)]];
+  return rows([
+    ["Weekly distance", `${(level.weeklyDistanceM / 1000).toFixed(1)} km`],
+    ...compared,
+    ["Total distance", `${(level.totalDistanceM / 1000).toFixed(0)} km`],
+    ["Time running", hoursMinutes(level.timeRunningS)],
+    ["Runs per week", level.runsPerWeek.toFixed(1)],
+    ["Cross-training per week", level.crossTrainingPerWeek.toFixed(1)],
+  ]);
+}
+
+function consistency(level: CurrentLevel, basis: StreakBasis): HTMLElement[] {
+  return rows([
+    ["Current streak", `${streaks[basis].current} wk`],
+    ["Longest streak ever", `${streaks[basis].longest} wk`],
+    ["Runs in period", String(level.runs)],
+    ["Weeks with a long run", `${level.weeksWithLongRun} of ${level.weeks}`],
+  ]);
+}
+
+// Calls onChange straight away with the initial value.
+function segmented<T extends string>(label: string, options: [T, string][], initial: T, onChange: (value: T) => void): HTMLElement {
+  const buttons = options.map(([value, text]) => {
+    const button = el("button", "", text);
+    button.onclick = () => choose(value);
     return button;
   });
-  const select = (period: Period) => {
+  const choose = (value: T) => {
     buttons.forEach((button, i) => {
-      const on = options[i]![0] === period;
+      const on = options[i]![0] === value;
       button.className = on ? "on" : "";
       button.setAttribute("aria-pressed", String(on));
     });
-    numbers.replaceChildren(...bigNumbers(currentLevel[period]));
-    groups.replaceChildren(...cards(currentLevel[period]));
-    recent.replaceChildren(...currentLevel[period].recent.map(row));
+    onChange(value);
   };
-  select("8w");
+  choose(initial);
   const selector = el("span", "seg", ...buttons);
   selector.setAttribute("role", "group");
-  selector.setAttribute("aria-label", "Period");
+  selector.setAttribute("aria-label", label);
+  return selector;
+}
+
+function rightNow(): HTMLElement[] {
+  const numbers = el("div", "huge");
+  const volumeRows = el("div", "lvl num");
+  const consistencyRows = el("div", "lvl num");
+  const raceCards = el("div", "contents");
+  const recent = el("tbody", "");
+  const shown: { period: Period; basis: StreakBasis } = { period: "8w", basis: "runs" };
+  const draw = () => {
+    const level = currentLevel[shown.period];
+    numbers.replaceChildren(...bigNumbers(level));
+    volumeRows.replaceChildren(...volume(level));
+    consistencyRows.replaceChildren(...consistency(level, shown.basis));
+    raceCards.replaceChildren(...cards(level));
+    recent.replaceChildren(...level.recent.map(row));
+  };
+  const periods: [Period, string][] = [["3w", "3 wk"], ["8w", "8 wk"], ["3m", "3 mo"], ["1y", "1 yr"], ["all", "All"]];
+  const periodSelector = segmented("Period", periods, shown.period, (period) => {
+    shown.period = period;
+    draw();
+  });
+  const streakSelector = segmented("Streak basis", [["runs", "Runs"], ["all", "Any activity"]], shown.basis, (basis) => {
+    shown.basis = basis;
+    draw();
+  });
   const labels = el("tr", "", ...COLUMNS.map(({ label }) => el("th", "", label)));
   return [
-    el("div", "now", el("h2", "", "Right now"), selector),
+    el("div", "now", el("h2", "", "Right now"), periodSelector),
     numbers,
-    groups,
+    el(
+      "div",
+      "groups",
+      el("div", "", el("h3", "", "Volume"), volumeRows),
+      el("div", "", el("div", "head", el("h3", "", "Consistency"), streakSelector), consistencyRows),
+      raceCards,
+    ),
     el("h3", "recent", "Recent activities"),
     el("table", "acts", el("thead", "", labels), recent),
   ];
@@ -377,26 +441,12 @@ function theStorySoFar(): HTMLElement[] {
     return canvas;
   });
   const charts = TREND_CHARTS.map((def, i) => trendChart(def, canvases[i]!));
-  const buttons = options.map(([unit, label]) => {
-    const button = el("button", "", label);
-    button.onclick = () => show(unit);
-    return button;
-  });
-  const show = (unit: keyof typeof trends) => {
-    buttons.forEach((button, i) => {
-      const on = options[i]![0] === unit;
-      button.className = on ? "on" : "";
-      button.setAttribute("aria-pressed", String(on));
-    });
+  const selector = segmented("Chart period", options, "month", (unit) => {
     charts.forEach((chart, i) => {
       chart.data = { labels: trends[unit].map((bucket) => bucket.key), datasets: TREND_CHARTS[i]!.datasets(trends[unit]) };
       chart.update();
     });
-  };
-  show("month");
-  const selector = el("span", "seg", ...buttons);
-  selector.setAttribute("role", "group");
-  selector.setAttribute("aria-label", "Chart period");
+  });
   return [
     el("h2", "story", "The story so far"),
     el("div", "filters", selector),

@@ -416,7 +416,22 @@ describe("periods", () => {
 
   test("a period with no runs is empty", async () => {
     const data = await imported([run("1", "4 nov 2026", "0", { type: "Senderismo" })]);
-    expect(data.currentLevel["8w"]).toMatchObject({ best1k: null, best5k: null, best10k: null, longestRun: null, longRuns: 0, weeks: 8, weeksWithLongRun: 0 });
+    expect(data.currentLevel["8w"]).toMatchObject({
+      best1k: null,
+      best5k: null,
+      best10k: null,
+      longestRun: null,
+      longRuns: 0,
+      weeks: 8,
+      weeksWithLongRun: 0,
+      weeklyDistanceM: 0,
+      weeklyDistanceChangePct: null,
+      totalDistanceM: 0,
+      timeRunningS: 0,
+      runs: 0,
+      runsPerWeek: 0,
+      crossTrainingPerWeek: 0.125,
+    });
   });
 
   test("the Longest run follows the period and carries its details", async () => {
@@ -526,6 +541,139 @@ describe("race cards", () => {
       paceSPerKm: 300,
       stoppedS: 90,
     });
+  });
+});
+
+describe("Volume", () => {
+  const run = (id: string, date: string, distance: string, row: Row = {}): Row => ({ id, date: `${date}, 10:00:00`, distance, ...row });
+
+  test.each([
+    ["3w", 700, 2100, 1000], // 21 days
+    ["8w", 262.5, 2100, 1000], // 56 days
+    ["3m", 159.78261, 2100, 1000], // 92 days
+    ["1y", 40.27397, 2100, 1000], // 365 days
+    ["all", 154.91803, 8100, 7000], // 366 days
+  ] as const)("%s divides by its length in days ÷ 7, with moving time", async (period, weekly, total, moving) => {
+    const data = await imported([
+      run("1", "4 nov 2026", "2100", { moving: "1000" }),
+      run("2", "4 nov 2025", "6000", { moving: "6000" }),
+    ]);
+    expect(data.currentLevel[period].weeklyDistanceM).toBeCloseTo(weekly, 3);
+    expect(data.currentLevel[period].totalDistanceM).toBe(total);
+    expect(data.currentLevel[period].timeRunningS).toBe(moving);
+  });
+
+  test("counts runs and cross-training per week, cross-training being any non-run activity", async () => {
+    const data = await imported([
+      run("1", "4 nov 2026", "5000"),
+      run("2", "3 nov 2026", "5000"),
+      run("3", "2 nov 2026", "5000"),
+      run("4", "1 nov 2026", "0", { type: "Entrenamiento con pesas" }),
+      run("5", "31 oct 2026", "9000", { type: "Senderismo" }),
+      run("6", "30 oct 2026", "0", { type: "Yoga" }),
+      run("7", "14 oct 2026", "5000"), // the day before the 3-week period starts
+      run("8", "13 oct 2026", "0", { type: "Natación" }),
+    ]);
+    expect(data.currentLevel["3w"]).toMatchObject({ runs: 3, runsPerWeek: 1, crossTrainingPerWeek: 1, totalDistanceM: 15_000 });
+    expect(data.currentLevel["8w"]).toMatchObject({ runs: 4, runsPerWeek: 0.5, crossTrainingPerWeek: 0.5 });
+  });
+});
+
+describe("previous-period change", () => {
+  const run = (id: string, date: string, distance: string, row: Row = {}): Row => ({ id, date: `${date}, 10:00:00`, distance, ...row });
+
+  test.each([
+    ["3w", "4 nov 2026", "15 oct 2026", "14 oct 2026", "24 sept 2026", "23 sept 2026"],
+    ["8w", "4 nov 2026", "10 sept 2026", "9 sept 2026", "16 jul 2026", "15 jul 2026"],
+    ["3m", "31 may 2026", "1 mar 2026", "28 feb 2026", "29 nov 2025", "28 nov 2025"], // 92 days back, not to 1 December
+    ["1y", "4 nov 2026", "5 nov 2025", "4 nov 2025", "5 nov 2024", "4 nov 2024"],
+  ] as const)("%s compares with the same length just before it", async (period, end, first, lastBefore, firstBefore, tooEarly) => {
+    const data = await imported([
+      run("1", end, "6000"),
+      run("2", first, "6000"),
+      run("3", lastBefore, "4000"),
+      run("4", firstBefore, "4000"),
+      run("5", tooEarly, "50000"),
+    ]);
+    expect(data.currentLevel[period].weeklyDistanceChangePct).toBe(50);
+  });
+
+  test("can be a fall, and counts run distance only", async () => {
+    const data = await imported([
+      run("1", "4 nov 2026", "3000"),
+      run("2", "3 nov 2026", "90000", { type: "Senderismo" }),
+      run("3", "10 oct 2026", "4000"),
+      run("4", "9 oct 2026", "90000", { type: "Senderismo" }),
+    ]);
+    expect(data.currentLevel["3w"].weeklyDistanceChangePct).toBe(-25);
+  });
+
+  test("is null on all", async () => {
+    const data = await imported([run("1", "4 nov 2026", "5000"), run("2", "4 nov 2020", "5000")]);
+    expect(data.currentLevel.all.weeklyDistanceChangePct).toBeNull();
+  });
+
+  test("is null when the period before has no run distance to compare with", async () => {
+    const data = await imported([run("1", "4 nov 2026", "5000"), run("2", "10 oct 2026", "9000", { type: "Senderismo" })]);
+    expect(data.currentLevel["3w"].weeklyDistanceChangePct).toBeNull();
+  });
+});
+
+describe("streaks", () => {
+  const run = (id: string, date: string, row: Row = {}): Row => ({ id, date: `${date}, 10:00:00`, ...row });
+  const hike = (id: string, date: string): Row => run(id, date, { type: "Senderismo" });
+
+  test("counts consecutive weeks, ending the current one at the newest activity's week", async () => {
+    const data = await imported([
+      run("1", "4 nov 2026"),
+      run("2", "27 oct 2026"),
+      run("3", "6 oct 2026"), // a week with no activity comes after this one
+      run("4", "29 sept 2026"),
+      run("5", "22 sept 2026"),
+    ]);
+    expect(data.streaks.runs).toEqual({ current: 2, longest: 3 });
+  });
+
+  test("weeks run Monday to Sunday", async () => {
+    const sameWeek = await imported([run("1", "1 nov 2026"), run("2", "26 oct 2026")]);
+    expect(sameWeek.streaks.runs).toEqual({ current: 1, longest: 1 });
+    const nextWeek = await imported([run("1", "2 nov 2026"), run("2", "1 nov 2026")]);
+    expect(nextWeek.streaks.runs).toEqual({ current: 2, longest: 2 });
+  });
+
+  test("weeks use timeZone, not UTC", async () => {
+    const data = await imported([
+      { id: "1", date: "1 nov 2026, 23:30:00" }, // Sunday in UTC, already Monday in Madrid
+      { id: "2", date: "26 oct 2026, 10:00:00" },
+    ]);
+    expect(data.streaks.runs).toEqual({ current: 2, longest: 2 });
+  });
+
+  test("the any-activity basis counts every Activity type, the runs basis only runs", async () => {
+    const data = await imported([run("1", "4 nov 2026"), hike("2", "27 oct 2026"), run("3", "20 oct 2026")]);
+    expect(data.streaks.all).toEqual({ current: 3, longest: 3 });
+    expect(data.streaks.runs).toEqual({ current: 1, longest: 1 });
+  });
+
+  test("the runs basis ends at the newest activity of any type, so a week with only a hike breaks it", async () => {
+    const data = await imported([hike("1", "4 nov 2026"), run("2", "27 oct 2026"), run("3", "20 oct 2026")]);
+    expect(data.streaks.runs).toEqual({ current: 0, longest: 2 });
+    expect(data.streaks.all).toEqual({ current: 3, longest: 3 });
+  });
+
+  test("the output doesn't depend on the day it is generated", async () => {
+    const data = await imported([run("1", "4 ene 2024"), run("2", "28 dic 2023")]); // deps' clock is November 2026
+    expect(data.streaks.runs).toEqual({ current: 2, longest: 2 });
+  });
+
+  test("a streak carries over a year end", async () => {
+    const data = await imported([run("1", "3 ene 2021"), run("2", "28 dic 2020"), run("3", "27 dic 2020")]);
+    expect(data.streaks.runs).toEqual({ current: 2, longest: 2 });
+  });
+
+  test("are zero with no activities", async () => {
+    const status = await generate(deps());
+    expect(status.ok && status.data.streaks).toEqual({ runs: { current: 0, longest: 0 }, all: { current: 0, longest: 0 } });
   });
 });
 

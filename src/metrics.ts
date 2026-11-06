@@ -19,10 +19,24 @@ export type ActivityRow = {
 };
 
 export type Period = "3w" | "8w" | "3m" | "1y" | "all";
+export type StreakBasis = "runs" | "all";
+type Streak = { current: number; longest: number };
 
 type Bests = { best1k: number | null; best5k: number | null; best10k: number | null; longestRun: ActivityRow | null };
 
-export type CurrentLevel = Bests & { longRuns: number; weeks: number; weeksWithLongRun: number; recent: ActivityRow[] };
+export type CurrentLevel = Bests & {
+  longRuns: number;
+  weeks: number;
+  weeksWithLongRun: number;
+  recent: ActivityRow[];
+  weeklyDistanceM: number;
+  weeklyDistanceChangePct: number | null;
+  totalDistanceM: number;
+  timeRunningS: number;
+  runs: number;
+  runsPerWeek: number;
+  crossTrainingPerWeek: number;
+};
 
 export type TrendEffort = { seconds: number; race: boolean };
 
@@ -40,6 +54,7 @@ export type DashboardData = {
   activities: ActivityRow[];
   currentLevel: Record<Period, CurrentLevel>;
   allTime: Bests & { fastest5kRace: ActivityRow | null; fastest7kRace: ActivityRow | null; fastest10kRace: ActivityRow | null };
+  streaks: Record<StreakBasis, Streak>;
   trends: { month: TrendBucket[]; week: TrendBucket[] };
 };
 
@@ -53,6 +68,7 @@ const LONG_RUN_M = 10_000;
 const RECENT_ACTIVITIES = 8;
 
 const isoDate = (ms: number) => new Date(ms).toISOString().slice(0, 10);
+const sum = (values: number[]) => values.reduce((total, value) => total + value, 0);
 const daysBetween = (from: string, to: string) => (Date.parse(to) - Date.parse(from)) / DAY_MS;
 
 // The day after the same date n months earlier, or after that month's last day if it is shorter.
@@ -160,14 +176,40 @@ function bests(runs: Run[]): Bests {
 
 function currentLevel(runs: Run[], activities: ActivityRow[], { start, end, days }: Span): CurrentLevel {
   const inPeriod = runs.filter((run) => run.row.date >= start);
+  const activitiesInPeriod = activities.filter((a) => a.date >= start);
   const longRuns = inPeriod.filter((run) => run.distanceM >= LONG_RUN_M);
+  const totalDistanceM = sum(inPeriod.map((run) => run.distanceM));
+  const weeks = days / 7;
+  // "All" starts at the first activity, so nothing comes before it and its change is null too.
+  const previousStart = isoDate(Date.parse(start) - days * DAY_MS);
+  const previousM = sum(runs.filter((run) => run.row.date >= previousStart && run.row.date < start).map((run) => run.distanceM));
   return {
     ...bests(inPeriod),
     longRuns: longRuns.length,
     weeks: Math.ceil(days / 7),
     weeksWithLongRun: new Set(longRuns.map((run) => Math.floor(daysBetween(run.row.date, end) / 7))).size,
-    recent: activities.filter((a) => a.date >= start).slice(0, RECENT_ACTIVITIES),
+    recent: activitiesInPeriod.slice(0, RECENT_ACTIVITIES),
+    weeklyDistanceM: totalDistanceM / weeks,
+    weeklyDistanceChangePct: previousM ? ((totalDistanceM - previousM) / previousM) * 100 : null,
+    totalDistanceM,
+    timeRunningS: sum(inPeriod.map((run) => run.movingS)),
+    runs: inPeriod.length,
+    runsPerWeek: inPeriod.length / weeks,
+    crossTrainingPerWeek: (activitiesInPeriod.length - inPeriod.length) / weeks,
   };
+}
+
+// Monday-to-Sunday week number. 1 January 1970 was a Thursday, so 3 days back is a Monday.
+const weekOf = (date: string) => Math.floor((Date.parse(date) / DAY_MS + 3) / 7);
+
+function streak(dates: string[], end: string): Streak {
+  const weeks = new Set(dates.map(weekOf));
+  const endingAt = (week: number) => {
+    let length = 0;
+    while (weeks.has(week - length)) length++;
+    return length;
+  };
+  return { current: endingAt(weekOf(end)), longest: Math.max(0, ...[...weeks].map(endingAt)) };
 }
 
 export function buildDashboardData(stored: StoredActivity[], settings: Settings, now: Date): DashboardData {
@@ -209,6 +251,10 @@ export function buildDashboardData(stored: StoredActivity[], settings: Settings,
       fastest5kRace: fastestRace(activities, 4900, 5600),
       fastest7kRace: fastestRace(activities, 6400, 7700),
       fastest10kRace: fastestRace(activities, 9900, 10500),
+    },
+    streaks: {
+      runs: streak(runs.map((run) => run.row.date), end),
+      all: streak(activities.map((a) => a.date), end),
     },
     trends: { month: trend(runs, first, end, monthOf, nextMonth), week: trend(runs, first, end, mondayOf, nextWeek) },
   };
