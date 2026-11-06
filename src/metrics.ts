@@ -38,12 +38,24 @@ export type CurrentLevel = Bests & {
   crossTrainingPerWeek: number;
 };
 
+export type TrendEffort = { seconds: number; race: boolean };
+
+// key is the month (YYYY-MM) or the week's Monday (YYYY-MM-DD).
+export type TrendBucket = {
+  key: string;
+  runDistanceM: number;
+  longestRunM: number | null;
+  best5k: TrendEffort | null;
+  best10k: TrendEffort | null;
+};
+
 export type DashboardData = {
   meta: { generatedAt: string; timeZone: string; newestActivity: string | null };
   activities: ActivityRow[];
   currentLevel: Record<Period, CurrentLevel>;
   allTime: Bests & { fastest5kRace: ActivityRow | null; fastest7kRace: ActivityRow | null; fastest10kRace: ActivityRow | null };
   streaks: Record<StreakBasis, Streak>;
+  trends: { month: TrendBucket[]; week: TrendBucket[] };
 };
 
 type Run = StoredActivity & { row: ActivityRow };
@@ -76,6 +88,43 @@ function periodSpans(end: string, first: string): Record<Period, Span> {
     "1y": span(monthsBackStart(end, 12)),
     all: span(first),
   };
+}
+
+const monthOf = (date: string) => date.slice(0, 7);
+const mondayOf = (date: string) => isoDate(Date.parse(date) - ((new Date(date).getUTCDay() + 6) % 7) * DAY_MS);
+// 31 days past the 1st always lands in the next month.
+const nextMonth = (month: string) => monthOf(isoDate(Date.parse(`${month}-01`) + 31 * DAY_MS));
+const nextWeek = (monday: string) => isoDate(Date.parse(monday) + 7 * DAY_MS);
+
+function fastest(runs: Run[], distanceM: number): TrendEffort | null {
+  const efforts = runs.flatMap((run) => {
+    const seconds = run.bestEfforts[distanceM];
+    return seconds === undefined ? [] : [{ seconds, race: run.row.race }];
+  });
+  return efforts.reduce<TrendEffort | null>((best, effort) => (best && best.seconds <= effort.seconds ? best : effort), null);
+}
+
+// Every bucket from first to end exists, even an empty one, so all charts share one axis.
+function trend(
+  runs: Run[],
+  first: string,
+  end: string,
+  keyOf: (date: string) => string,
+  next: (key: string) => string,
+): TrendBucket[] {
+  const buckets: TrendBucket[] = [];
+  for (let key = keyOf(first); key <= keyOf(end); key = next(key)) {
+    const inBucket = runs.filter((run) => keyOf(run.row.date) === key);
+    const distances = inBucket.map((run) => run.distanceM);
+    buckets.push({
+      key,
+      runDistanceM: distances.reduce((sum, distanceM) => sum + distanceM, 0),
+      longestRunM: distances.length ? Math.max(...distances) : null,
+      best5k: fastest(inBucket, 5000),
+      best10k: fastest(inBucket, 10000),
+    });
+  }
+  return buckets;
 }
 
 function heartRate(timeAtBpm: TimeAtBpm | null): Pick<ActivityRow, "avgHr" | "maxHr"> {
@@ -187,7 +236,8 @@ export function buildDashboardData(stored: StoredActivity[], settings: Settings,
   const runs = stored.map((a, i) => ({ ...a, row: activities[i]! })).filter((a) => a.type === "run");
   // With nothing stored there is no newest activity, and every period is empty anyway.
   const end = activities[0]?.date ?? localDate.format(now);
-  const spans = Object.entries(periodSpans(end, activities.at(-1)?.date ?? end));
+  const first = activities.at(-1)?.date ?? end;
+  const spans = Object.entries(periodSpans(end, first));
   return {
     meta: {
       generatedAt: now.toISOString(),
@@ -206,5 +256,6 @@ export function buildDashboardData(stored: StoredActivity[], settings: Settings,
       runs: streak(runs.map((run) => run.row.date), end),
       all: streak(activities.map((a) => a.date), end),
     },
+    trends: { month: trend(runs, first, end, monthOf, nextMonth), week: trend(runs, first, end, mondayOf, nextWeek) },
   };
 }

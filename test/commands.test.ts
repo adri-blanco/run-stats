@@ -677,6 +677,62 @@ describe("streaks", () => {
   });
 });
 
+describe("trends", () => {
+  const run = (id: string, date: string, distance: string, row: Row = {}): Row => ({ id, date: `${date}, 10:00:00`, distance, ...row });
+
+  test("a month holds its total run distance and longest run, and non-runs add nothing", async () => {
+    const data = await imported([
+      run("1", "20 oct 2026", "8000"),
+      run("2", "3 oct 2026", "5000"),
+      run("3", "4 oct 2026", "30000", { type: "Senderismo" }),
+    ]);
+    expect(data.trends.month).toMatchObject([{ key: "2026-10", runDistanceM: 13000, longestRunM: 8000 }]);
+  });
+
+  test("the axis has no holes: an empty month or week between activities still has a bucket", async () => {
+    const data = await imported([run("1", "4 nov 2026", "5000"), run("2", "15 sept 2026", "6000")]);
+    expect(data.trends.month.map((b) => b.key)).toEqual(["2026-09", "2026-10", "2026-11"]);
+    expect(data.trends.month[1]).toMatchObject({ runDistanceM: 0, longestRunM: null, best5k: null, best10k: null });
+    expect(data.trends.week).toHaveLength(8);
+  });
+
+  test("the axis covers every activity, not only runs, so all charts share it", async () => {
+    const data = await imported([run("1", "4 nov 2026", "5000"), run("2", "15 sept 2026", "0", { type: "Natación" })]);
+    expect(data.trends.month[0]).toMatchObject({ key: "2026-09", runDistanceM: 0 });
+  });
+
+  test("a week is keyed by its Monday, and Sunday belongs to the week before", async () => {
+    const data = await imported([run("1", "2 nov 2026", "5000"), run("2", "1 nov 2026", "6000")]);
+    expect(data.trends.week).toMatchObject([
+      { key: "2026-10-26", runDistanceM: 6000 },
+      { key: "2026-11-02", runDistanceM: 5000 },
+    ]);
+  });
+
+  test("weeks and months group on the settings time zone, not UTC", async () => {
+    // Sunday 31 Jan 23:30 UTC is Monday 1 Feb 00:30 in Madrid.
+    const data = await imported([{ date: "31 ene 2027, 23:30:00", distance: "5000" }]);
+    expect(data.trends.month[0]?.key).toBe("2027-02");
+    expect(data.trends.week[0]?.key).toBe("2027-02-01");
+  });
+
+  test("a bucket keeps its fastest effort at each distance, flagged if it came from a race", async () => {
+    const effort = (id: string, day: string, seconds: number, row: Row = {}) => {
+      const file = `activities/${id}.tcx.gz`;
+      return [{ id, date: `${day} nov 2026, 10:00:00`, file, ...row }, { [file]: tcx([{ at: 0, m: 0 }, { at: seconds, m: 5000 }]) }] as const;
+    };
+    const [slow, slowFile] = effort("1", "2", 1700);
+    const [race, raceFile] = effort("2", "3", 1500, { tags: "race" });
+    const [training, trainingFile] = effort("3", "9", 1600);
+    const data = await imported([training, race, slow], { ...slowFile, ...raceFile, ...trainingFile });
+    expect(data.trends.month[0]).toMatchObject({ best5k: { seconds: 1500, race: true }, best10k: null });
+    expect(data.trends.week.map((b) => b.best5k)).toEqual([
+      { seconds: 1500, race: true },
+      { seconds: 1600, race: false },
+    ]);
+  });
+});
+
 describe("a corrupt activity file", () => {
   const good = tcx([{ at: 0, bpm: 100 }, { at: 2, bpm: 100 }]);
 
