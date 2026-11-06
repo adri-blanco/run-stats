@@ -8,6 +8,7 @@ export type ActivityRow = {
   type: string;
   distanceM: number;
   movingS: number;
+  stoppedS: number;
   paceSPerKm: number | null;
   avgHr: number | null;
   maxHr: number | null;
@@ -19,9 +20,9 @@ export type ActivityRow = {
 
 export type Period = "3w" | "8w" | "3m" | "1y" | "all";
 
-type Bests = { best1k: number | null; best5k: number | null; best10k: number | null; longestRunM: number | null };
+type Bests = { best1k: number | null; best5k: number | null; best10k: number | null; longestRun: ActivityRow | null };
 
-export type CurrentLevel = Bests & { longRuns: number; weeks: number; weeksWithLongRun: number };
+export type CurrentLevel = Bests & { longRuns: number; weeks: number; weeksWithLongRun: number; recent: ActivityRow[] };
 
 export type TrendEffort = { seconds: number; race: boolean };
 
@@ -38,15 +39,18 @@ export type DashboardData = {
   meta: { generatedAt: string; timeZone: string; newestActivity: string | null };
   activities: ActivityRow[];
   currentLevel: Record<Period, CurrentLevel>;
-  allTime: Bests;
+  allTime: Bests & { fastest5kRace: ActivityRow | null; fastest7kRace: ActivityRow | null; fastest10kRace: ActivityRow | null };
   trends: { month: TrendBucket[]; week: TrendBucket[] };
 };
+
+type Run = StoredActivity & { row: ActivityRow };
 
 // Dates are local YYYY-MM-DD strings, both ends included.
 type Span = { start: string; end: string; days: number };
 
 const DAY_MS = 86_400_000;
 const LONG_RUN_M = 10_000;
+const RECENT_ACTIVITIES = 8;
 
 const isoDate = (ms: number) => new Date(ms).toISOString().slice(0, 10);
 const daysBetween = (from: string, to: string) => (Date.parse(to) - Date.parse(from)) / DAY_MS;
@@ -70,24 +74,23 @@ function periodSpans(end: string, first: string): Record<Period, Span> {
   };
 }
 
-const isRace = (tags: string) => tags.split("|").includes("race");
 const monthOf = (date: string) => date.slice(0, 7);
 const mondayOf = (date: string) => isoDate(Date.parse(date) - ((new Date(date).getUTCDay() + 6) % 7) * DAY_MS);
 // 31 days past the 1st always lands in the next month.
 const nextMonth = (month: string) => monthOf(isoDate(Date.parse(`${month}-01`) + 31 * DAY_MS));
 const nextWeek = (monday: string) => isoDate(Date.parse(monday) + 7 * DAY_MS);
 
-function fastest(runs: StoredActivity[], distanceM: number): TrendEffort | null {
+function fastest(runs: Run[], distanceM: number): TrendEffort | null {
   const efforts = runs.flatMap((run) => {
     const seconds = run.bestEfforts[distanceM];
-    return seconds === undefined ? [] : [{ seconds, race: isRace(run.tags) }];
+    return seconds === undefined ? [] : [{ seconds, race: run.row.race }];
   });
   return efforts.reduce<TrendEffort | null>((best, effort) => (best && best.seconds <= effort.seconds ? best : effort), null);
 }
 
 // Every bucket from first to end exists, even an empty one, so all charts share one axis.
 function trend(
-  runs: (StoredActivity & { date: string })[],
+  runs: Run[],
   first: string,
   end: string,
   keyOf: (date: string) => string,
@@ -95,7 +98,7 @@ function trend(
 ): TrendBucket[] {
   const buckets: TrendBucket[] = [];
   for (let key = keyOf(first); key <= keyOf(end); key = next(key)) {
-    const inBucket = runs.filter((run) => keyOf(run.date) === key);
+    const inBucket = runs.filter((run) => keyOf(run.row.date) === key);
     const distances = inBucket.map((run) => run.distanceM);
     buckets.push({
       key,
@@ -132,7 +135,17 @@ function session(title: string): Pick<ActivityRow, "sessionType" | "sessionDetai
   return { sessionType, sessionDetail: sessionType && label };
 }
 
-function bests(runs: StoredActivity[]): Bests {
+// Ties go to the first row, which is the newest.
+function lowestBy(rows: ActivityRow[], rank: (row: ActivityRow) => number): ActivityRow | null {
+  return rows.reduce<ActivityRow | null>((best, row) => (!best || rank(row) < rank(best) ? row : best), null);
+}
+
+function fastestRace(activities: ActivityRow[], minM: number, maxM: number): ActivityRow | null {
+  const inBand = activities.filter((a) => a.race && a.distanceM >= minM && a.distanceM <= maxM);
+  return lowestBy(inBand, (a) => a.movingS / a.distanceM);
+}
+
+function bests(runs: Run[]): Bests {
   const lowest = (distanceM: number) => {
     const times = runs.flatMap((run) => run.bestEfforts[distanceM] ?? []);
     return times.length ? Math.min(...times) : null;
@@ -141,18 +154,19 @@ function bests(runs: StoredActivity[]): Bests {
     best1k: lowest(1000),
     best5k: lowest(5000),
     best10k: lowest(10000),
-    longestRunM: runs.length ? Math.max(...runs.map((run) => run.distanceM)) : null,
+    longestRun: lowestBy(runs.map((run) => run.row), (row) => -row.distanceM),
   };
 }
 
-function currentLevel(runs: (StoredActivity & { date: string })[], { start, end, days }: Span): CurrentLevel {
-  const inPeriod = runs.filter((run) => run.date >= start);
+function currentLevel(runs: Run[], activities: ActivityRow[], { start, end, days }: Span): CurrentLevel {
+  const inPeriod = runs.filter((run) => run.row.date >= start);
   const longRuns = inPeriod.filter((run) => run.distanceM >= LONG_RUN_M);
   return {
     ...bests(inPeriod),
     longRuns: longRuns.length,
     weeks: Math.ceil(days / 7),
-    weeksWithLongRun: new Set(longRuns.map((run) => Math.floor(daysBetween(run.date, end) / 7))).size,
+    weeksWithLongRun: new Set(longRuns.map((run) => Math.floor(daysBetween(run.row.date, end) / 7))).size,
+    recent: activities.filter((a) => a.date >= start).slice(0, RECENT_ACTIVITIES),
   };
 }
 
@@ -163,22 +177,21 @@ export function buildDashboardData(stored: StoredActivity[], settings: Settings,
     month: "2-digit",
     day: "2-digit",
   });
-  const activities = stored.map(({ stravaId, startUtc, type, title, tags, distanceM, movingS, timeAtBpm }) => ({
+  const activities = stored.map(({ stravaId, startUtc, type, title, tags, distanceM, elapsedS, movingS, timeAtBpm }) => ({
     stravaId,
     date: localDate.format(new Date(startUtc)),
     title,
     type,
     distanceM,
     movingS,
+    stoppedS: elapsedS - movingS,
     paceSPerKm: type === "run" && distanceM ? movingS / (distanceM / 1000) : null,
     ...heartRate(timeAtBpm),
-    race: type === "run" && isRace(tags),
+    race: type === "run" && tags.split("|").includes("race"),
     longRun: type === "run" && distanceM >= LONG_RUN_M,
     ...session(type === "run" ? title : ""),
   }));
-  const runs = stored
-    .filter((a) => a.type === "run")
-    .map((a) => ({ ...a, date: localDate.format(new Date(a.startUtc)) }));
+  const runs = stored.map((a, i) => ({ ...a, row: activities[i]! })).filter((a) => a.type === "run");
   // With nothing stored there is no newest activity, and every period is empty anyway.
   const end = activities[0]?.date ?? localDate.format(now);
   const first = activities.at(-1)?.date ?? end;
@@ -190,8 +203,13 @@ export function buildDashboardData(stored: StoredActivity[], settings: Settings,
       newestActivity: activities[0]?.date ?? null,
     },
     activities,
-    currentLevel: Object.fromEntries(spans.map(([period, span]) => [period, currentLevel(runs, span)])) as Record<Period, CurrentLevel>,
-    allTime: bests(runs),
+    currentLevel: Object.fromEntries(spans.map(([period, span]) => [period, currentLevel(runs, activities, span)])) as Record<Period, CurrentLevel>,
+    allTime: {
+      ...bests(runs),
+      fastest5kRace: fastestRace(activities, 4900, 5600),
+      fastest7kRace: fastestRace(activities, 6400, 7700),
+      fastest10kRace: fastestRace(activities, 9900, 10500),
+    },
     trends: { month: trend(runs, first, end, monthOf, nextMonth), week: trend(runs, first, end, mondayOf, nextWeek) },
   };
 }
