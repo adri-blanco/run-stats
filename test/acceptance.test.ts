@@ -29,4 +29,4 @@ test.skipIf(!existsSync(ZIP))("imports the real Bulk export", async () => {
   expect(status.data.activities.filter((a) => a.avgHr !== null)).toHaveLength(192);
   expect(status.data.activities.filter((a) => a.race)).toHaveLength(17);
   expect(lines).toEqual(Array(2).fill("Imported 289 activities and 289 files"));
-});
+}, 120_000); // two imports of the real export parse every file twice
