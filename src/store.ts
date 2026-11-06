@@ -16,14 +16,18 @@ export type NewActivity = {
 // Seconds at each bpm. JSON object keys are strings, so a bpm is a string key here.
 export type TimeAtBpm = Record<string, number>;
 
+export type BestEffort = { distanceM: number; seconds: number; startOffsetS: number };
+
 export type StoredActivity = Pick<NewActivity, "startUtc" | "type" | "title" | "tags" | "distanceM" | "movingS"> & {
   id: number;
   stravaId: string | null;
   source: string;
   timeAtBpm: TimeAtBpm | null;
+  // Seconds per distance in metres, a string key for the same reason as TimeAtBpm.
+  bestEfforts: Record<string, number>;
 };
 
-export type StaleFile = { id: number; startUtc: string; format: string; gz: Uint8Array };
+export type StaleFile = { id: number; startUtc: string; type: string; format: string; gz: Uint8Array };
 
 export type Store = {
   transaction<T>(run: () => Promise<T>): Promise<T>;
@@ -31,7 +35,7 @@ export type Store = {
   remove(ids: number[]): void;
   activities(): StoredActivity[];
   staleFiles(version: number): StaleFile[];
-  saveDerived(id: number, timeAtBpm: TimeAtBpm | null, version: number): void;
+  saveDerived(id: number, timeAtBpm: TimeAtBpm | null, efforts: BestEffort[], version: number): void;
 };
 
 const SCHEMA = `
@@ -54,6 +58,13 @@ const SCHEMA = `
     format TEXT NOT NULL,
     file_gz BLOB NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS best_effort (
+    activity_id INTEGER NOT NULL REFERENCES activity(id) ON DELETE CASCADE,
+    distance_m INTEGER NOT NULL,
+    seconds REAL NOT NULL,
+    start_offset_s REAL NOT NULL,
+    PRIMARY KEY (activity_id, distance_m)
+  );
 `;
 
 export async function withStore<T>(path: string, use: (store: Store) => Promise<T>): Promise<T> {
@@ -67,6 +78,8 @@ export async function withStore<T>(path: string, use: (store: Store) => Promise<
     );
     const insertFile = db.query("INSERT INTO activity_file (activity_id, format, file_gz) VALUES (?, ?, ?)");
     const saveDerived = db.query("UPDATE activity SET time_at_bpm = ?, derive_version = ? WHERE id = ?");
+    const deleteEfforts = db.query("DELETE FROM best_effort WHERE activity_id = ?");
+    const insertEffort = db.query("INSERT INTO best_effort (activity_id, distance_m, seconds, start_offset_s) VALUES (?, ?, ?, ?)");
     const removeActivity = db.query("DELETE FROM activity WHERE id = ?");
     return await use({
       // Hand-written because db.transaction can't span the await of the page build.
@@ -95,22 +108,29 @@ export async function withStore<T>(path: string, use: (store: Store) => Promise<
           db
             .query(
               `SELECT id, strava_id AS stravaId, source, start_utc AS startUtc, type, title, tags,
-                      distance_m AS distanceM, moving_s AS movingS, time_at_bpm AS timeAtBpm
+                      distance_m AS distanceM, moving_s AS movingS, time_at_bpm AS timeAtBpm,
+                      (SELECT json_group_object(CAST(distance_m AS TEXT), seconds) FROM best_effort WHERE activity_id = activity.id) AS bestEfforts
                FROM activity ORDER BY start_utc DESC`,
             )
-            .all() as (Omit<StoredActivity, "timeAtBpm"> & { timeAtBpm: string | null })[]
-        ).map((a) => ({ ...a, timeAtBpm: a.timeAtBpm === null ? null : JSON.parse(a.timeAtBpm) })),
+            .all() as (Omit<StoredActivity, "timeAtBpm" | "bestEfforts"> & { timeAtBpm: string | null; bestEfforts: string })[]
+        ).map((a) => ({
+          ...a,
+          timeAtBpm: a.timeAtBpm === null ? null : JSON.parse(a.timeAtBpm),
+          bestEfforts: JSON.parse(a.bestEfforts),
+        })),
       staleFiles: (version) =>
         db
           .query(
-            `SELECT activity.id, start_utc AS startUtc, format, file_gz AS gz
+            `SELECT activity.id, start_utc AS startUtc, type, format, file_gz AS gz
              FROM activity JOIN activity_file ON activity_id = activity.id
              WHERE derive_version < ?`,
           )
           .all(version) as StaleFile[],
-      saveDerived: (id, timeAtBpm, version) => {
+      saveDerived: db.transaction((id: number, timeAtBpm: TimeAtBpm | null, efforts: BestEffort[], version: number) => {
         saveDerived.run(timeAtBpm && JSON.stringify(timeAtBpm), version, id);
-      },
+        deleteEfforts.run(id);
+        for (const e of efforts) insertEffort.run(id, e.distanceM, e.seconds, e.startOffsetS);
+      }),
     });
   } finally {
     db.close();

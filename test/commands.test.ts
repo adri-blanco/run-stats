@@ -37,14 +37,17 @@ function exportZip(rows: Row[], files: Record<string, Uint8Array> = {}): Uint8Ar
   return zipSync({ "activities.csv": new TextEncoder().encode(csv), ...files });
 }
 
-type Point = { at: number; bpm?: number };
+// m is the distance covered so far: the watch's own figure in TCX and FIT, coordinates in GPX.
+type Point = { at: number; bpm?: number; m?: number };
 
 const START = Date.UTC(2026, 10, 4, 18);
 const isoAt = (seconds: number) => new Date(START + seconds * 1000).toISOString();
 const hrTag = (bpm?: number) => (bpm === undefined ? "" : `<HeartRateBpm><Value>${bpm}</Value></HeartRateBpm>`);
+const distanceTag = (m?: number) => (m === undefined ? "" : `<DistanceMeters>${m}</DistanceMeters>`);
+const METRES_PER_DEGREE = 111_194.93;
 
 function tcx(points: Point[]): Uint8Array {
-  const trackpoints = points.map((p) => `<Trackpoint><Time>${isoAt(p.at)}</Time>${hrTag(p.bpm)}</Trackpoint>`);
+  const trackpoints = points.map((p) => `<Trackpoint><Time>${isoAt(p.at)}</Time>${distanceTag(p.m)}${hrTag(p.bpm)}</Trackpoint>`);
   return gzipSync(
     new TextEncoder().encode(
       `<?xml version="1.0"?><TrainingCenterDatabase><Activities><Activity Sport="Running"><Lap><Track>${trackpoints.join("")}</Track></Lap></Activity></Activities></TrainingCenterDatabase>`,
@@ -57,7 +60,7 @@ function gpx(points: Point[]): Uint8Array {
     bpm === undefined
       ? ""
       : `<extensions><gpxtpx:TrackPointExtension><gpxtpx:hr>${bpm}</gpxtpx:hr></gpxtpx:TrackPointExtension></extensions>`;
-  const trackpoints = points.map((p) => `<trkpt lat="42.9" lon="-8.3"><time>${isoAt(p.at)}</time>${hr(p.bpm)}</trkpt>`);
+  const trackpoints = points.map((p) => `<trkpt lat="${42.9 + (p.m ?? 0) / METRES_PER_DEGREE}" lon="-8.3"><time>${isoAt(p.at)}</time>${hr(p.bpm)}</trkpt>`);
   return new TextEncoder().encode(
     `<?xml version="1.0"?><gpx xmlns:gpxtpx="http://www.garmin.com/xmlschemas/TrackPointExtension/v1"><trk><trkseg>${trackpoints.join("")}</trkseg></trk></gpx>`,
   );
@@ -67,7 +70,7 @@ function fit(points: Point[]): Uint8Array {
   const encoder = new Encoder();
   encoder.writeMesg({ mesgNum: Profile.MesgNum.FILE_ID!, type: "activity", manufacturer: "garmin", product: 1, timeCreated: new Date(START) } as any);
   for (const p of points) {
-    encoder.writeMesg({ mesgNum: Profile.MesgNum.RECORD!, timestamp: new Date(START + p.at * 1000), heartRate: p.bpm } as any);
+    encoder.writeMesg({ mesgNum: Profile.MesgNum.RECORD!, timestamp: new Date(START + p.at * 1000), heartRate: p.bpm, distance: p.m } as any);
   }
   return gzipSync(encoder.close());
 }
@@ -249,6 +252,159 @@ describe("heart rate from activity files", () => {
     const activity = await importedFile("activities/1.tcx.gz", tcx([{ at: 0 }, { at: 1 }]));
     expect(activity).toMatchObject({ avgHr: null, maxHr: null });
     expect(lines.join("\n")).not.toContain("Warning");
+  });
+});
+
+describe("best efforts", () => {
+  const run = (points: Point[], name = "activities/1.tcx.gz", file = tcx(points), row: Row = {}) =>
+    imported([{ file: name, ...row }], { [name]: file });
+
+  test("each distance takes the shortest time between two samples at least that far apart", async () => {
+    const data = await run([{ at: 0, m: 0 }, { at: 300, m: 1000 }, { at: 500, m: 2000 }, { at: 1000, m: 3000 }, { at: 1800, m: 7000 }, { at: 3000, m: 12000 }]);
+    expect(data.allTime).toMatchObject({ best1k: 200, best5k: 1200, best10k: 2500 });
+  });
+
+  test("a stop inside the stretch counts", async () => {
+    const data = await run([{ at: 0, m: 0 }, { at: 150, m: 500 }, { at: 750, m: 500 }, { at: 900, m: 1000 }]);
+    expect(data.allTime.best1k).toBe(900);
+  });
+
+  test("uses the next sample past the target, with no interpolation", async () => {
+    const data = await run([{ at: 0, m: 0 }, { at: 100, m: 900 }, { at: 200, m: 1100 }]);
+    expect(data.allTime.best1k).toBe(200);
+  });
+
+  test.each([
+    ["TCX, from the watch's distance", "activities/1.tcx.gz", tcx],
+    ["FIT, from the watch's distance", "activities/1.fit.gz", fit],
+    ["GPX, from coordinates", "activities/1.gpx", gpx],
+  ])("%s", async (_, name, encode) => {
+    const points = [{ at: 0, m: 0 }, { at: 300, m: 500 }, { at: 700, m: 1510 }, { at: 850, m: 1600 }];
+    const data = await run(points, name, encode(points));
+    expect(data.allTime.best1k).toBe(400);
+  });
+
+  test("GPX measures the coordinates, not the activity's summary distance", async () => {
+    const points = [{ at: 0, m: 0 }, { at: 300, m: 900 }];
+    const data = await run(points, "activities/1.gpx", gpx(points), { distance: "5000" });
+    expect(data.allTime.best1k).toBeNull();
+  });
+
+  test("a run shorter than the target has no effort at that distance", async () => {
+    const data = await run([{ at: 0, m: 0 }, { at: 300, m: 1000 }, { at: 1400, m: 4999 }]);
+    expect(data.allTime).toMatchObject({ best1k: 300, best5k: null, best10k: null });
+  });
+
+  test("a run with no distance in its file has no effort, and no warning", async () => {
+    const data = await run([{ at: 0, bpm: 100 }, { at: 400, bpm: 100 }]);
+    expect(data.allTime.best1k).toBeNull();
+    expect(lines.join("\n")).not.toContain("Warning");
+  });
+
+  test("samples missing a distance are skipped", async () => {
+    const data = await run([{ at: 0, m: 0 }, { at: 100 }, { at: 400, m: 1000 }]);
+    expect(data.allTime.best1k).toBe(400);
+  });
+
+  test("only runs have best efforts", async () => {
+    const data = await run([{ at: 0, m: 0 }, { at: 300, m: 1000 }], undefined, undefined, { type: "Senderismo" });
+    expect(data.allTime.best1k).toBeNull();
+  });
+
+  test("the all-time value is the best across runs, races included", async () => {
+    const points = (at: number) => [{ at: 0, m: 0 }, { at, m: 1000 }];
+    const data = await imported(
+      [
+        { id: "1", date: "1 nov 2026, 10:00:00", file: "activities/1.tcx.gz" },
+        { id: "2", date: "2 nov 2026, 10:00:00", file: "activities/2.tcx.gz", tags: "race" },
+        { id: "3", date: "3 nov 2026, 10:00:00", file: "activities/3.tcx.gz" },
+      ],
+      { "activities/1.tcx.gz": tcx(points(320)), "activities/2.tcx.gz": tcx(points(290)), "activities/3.tcx.gz": tcx(points(310)) },
+    );
+    expect(data.allTime.best1k).toBe(290);
+  });
+});
+
+describe("periods", () => {
+  const run = (id: string, date: string, distance: string, row: Row = {}): Row => ({ id, date: `${date}, 10:00:00`, distance, ...row });
+
+  test.each([
+    ["3w", "15 oct 2026", "14 oct 2026"],
+    ["8w", "10 sept 2026", "9 sept 2026"],
+    ["3m", "5 ago 2026", "4 ago 2026"],
+    ["1y", "5 nov 2025", "4 nov 2025"],
+  ] as const)("%s runs from %s, leaving out %s", async (period, inside, outside) => {
+    const data = await imported([run("1", "4 nov 2026", "5000"), run("2", inside, "12000"), run("3", outside, "15000")]);
+    expect(data.currentLevel[period]).toMatchObject({ longestRunM: 12000, longRuns: 1 });
+  });
+
+  test("all starts at the first activity", async () => {
+    const data = await imported([run("1", "4 nov 2026", "5000"), run("2", "15 ene 2022", "15000")]);
+    expect(data.currentLevel.all).toMatchObject({ longestRunM: 15000, longRuns: 1 });
+  });
+
+  test("a period ends on the newest activity of any type, not the newest run", async () => {
+    const data = await imported([run("1", "4 nov 2026", "0", { type: "Senderismo" }), run("2", "14 oct 2026", "12000")]);
+    expect(data.currentLevel["3w"]).toMatchObject({ longestRunM: null, longRuns: 0 });
+  });
+
+  test("a period ends on the local date of the newest activity, using timeZone", async () => {
+    const data = await imported([
+      { id: "1", date: "31 oct 2026, 23:30:00", distance: "5000" }, // already 1 November in Madrid
+      { id: "2", date: "11 oct 2026, 20:00:00", distance: "12000" },
+    ]);
+    expect(data.currentLevel["3w"].longestRunM).toBe(5000);
+  });
+
+  test.each([
+    ["3m", "31 may 2026", "1 mar 2026", "28 feb 2026"],
+    ["1y", "29 feb 2024", "1 mar 2023", "28 feb 2023"],
+  ] as const)("%s counts back calendar months from %s, on a date the start month lacks", async (period, end, inside, outside) => {
+    const data = await imported([run("1", end, "5000"), run("2", inside, "12000"), run("3", outside, "15000")]);
+    expect(data.currentLevel[period]).toMatchObject({ longestRunM: 12000, longRuns: 1 });
+  });
+
+  test("best efforts follow the period, with the all-time value alongside", async () => {
+    const effort = (at: number) => tcx([{ at: 0, m: 0 }, { at, m: 1000 }]);
+    const data = await imported(
+      [
+        { id: "1", date: "4 nov 2026, 10:00:00", file: "activities/1.tcx.gz" },
+        { id: "2", date: "4 ene 2026, 10:00:00", file: "activities/2.tcx.gz" },
+      ],
+      { "activities/1.tcx.gz": effort(300), "activities/2.tcx.gz": effort(250) },
+    );
+    expect(data.currentLevel["8w"].best1k).toBe(300);
+    expect(data.allTime.best1k).toBe(250);
+  });
+
+  test("the period and all-time longest run and Long runs count runs only", async () => {
+    const data = await imported([run("1", "4 nov 2026", "5000"), run("2", "3 nov 2026", "30000", { type: "Senderismo" })]);
+    expect(data.currentLevel["8w"]).toMatchObject({ longestRunM: 5000, longRuns: 0 });
+    expect(data.allTime.longestRunM).toBe(5000);
+  });
+
+  test("weeks with a Long run count 7-day blocks back from the end, not calendar weeks", async () => {
+    const data = await imported([
+      run("1", "4 nov 2026", "10000"),
+      run("2", "29 oct 2026", "10000"), // same block as the 4th, and the same Monday-to-Sunday week as the 28th
+      run("3", "28 oct 2026", "10000"),
+      run("4", "21 oct 2026", "9999"),
+    ]);
+    expect(data.currentLevel["8w"]).toMatchObject({ longRuns: 3, weeksWithLongRun: 2 });
+  });
+
+  test("a period is as many weeks as its 7-day blocks, counting a part block", async () => {
+    const data = await imported([run("1", "4 nov 2026", "5000"), run("2", "4 nov 2025", "5000")]);
+    expect(data.currentLevel["3w"].weeks).toBe(3);
+    expect(data.currentLevel["8w"].weeks).toBe(8);
+    expect(data.currentLevel["3m"].weeks).toBe(14); // 92 days
+    expect(data.currentLevel["1y"].weeks).toBe(53); // 365 days
+    expect(data.currentLevel.all.weeks).toBe(53); // 366 days
+  });
+
+  test("a period with no runs is empty", async () => {
+    const data = await imported([run("1", "4 nov 2026", "0", { type: "Senderismo" })]);
+    expect(data.currentLevel["8w"]).toEqual({ best1k: null, best5k: null, best10k: null, longestRunM: null, longRuns: 0, weeks: 8, weeksWithLongRun: 0 });
   });
 });
 
@@ -520,6 +676,26 @@ describe("generate", () => {
     expect(status.ok && status.data.activities[0]).toMatchObject({ avgHr: 100, maxHr: 100 });
   });
 
+  test("re-derives best efforts too", async () => {
+    const file = tcx([{ at: 0, m: 0 }, { at: 300, m: 1000 }]);
+    await imported([{ file: "activities/1.tcx.gz" }], { "activities/1.tcx.gz": file });
+    ageRows("DELETE FROM best_effort");
+
+    const status = await generate(deps());
+
+    expect(status.ok && status.data.allTime.best1k).toBe(300);
+  });
+
+  test("a re-derive replaces old best efforts instead of adding to them", async () => {
+    const file = tcx([{ at: 0, m: 0 }, { at: 300, m: 1000 }]);
+    await imported([{ file: "activities/1.tcx.gz" }], { "activities/1.tcx.gz": file });
+    ageRows("UPDATE best_effort SET seconds = 100");
+
+    const status = await generate(deps());
+
+    expect(status.ok && status.data.allTime.best1k).toBe(300);
+  });
+
   test("leaves a current row alone", async () => {
     await imported([{ file: "activities/1.tcx.gz" }], { "activities/1.tcx.gz": tcx([{ at: 0, bpm: 100 }, { at: 2, bpm: 100 }]) });
     const db = new Database(deps().dbPath);
@@ -532,13 +708,14 @@ describe("generate", () => {
   });
 
   test("clears old derived values when a re-derive can't read the file", async () => {
-    const file = tcx([{ at: 0, bpm: 100 }, { at: 2, bpm: 100 }]);
+    const file = tcx([{ at: 0, bpm: 100, m: 0 }, { at: 300, bpm: 100, m: 1000 }]);
     await imported([{ file: "activities/1.tcx.gz" }], { "activities/1.tcx.gz": file });
     ageRows("UPDATE activity_file SET file_gz = x'010203'");
 
     const status = await generate(deps());
 
     expect(status.ok && status.data.activities[0]).toMatchObject({ avgHr: null, maxHr: null });
+    expect(status.ok && status.data.allTime.best1k).toBeNull();
     expect(lines.join("\n")).toContain("Warning");
   });
 
@@ -546,6 +723,7 @@ describe("generate", () => {
     const status = await generate(deps());
     expect(status.ok && status.data.activities).toEqual([]);
     expect(status.ok && status.data.meta.newestActivity).toBeNull();
+    expect(status.ok && status.data.currentLevel["8w"].longRuns).toBe(0);
   });
 });
 

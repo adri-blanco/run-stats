@@ -28,5 +28,7 @@ test.skipIf(!existsSync(ZIP))("imports the real Bulk export", async () => {
   expect(status.data.activities.filter((a) => a.type === "run")).toHaveLength(200);
   expect(status.data.activities.filter((a) => a.avgHr !== null)).toHaveLength(192);
   expect(status.data.activities.filter((a) => a.race)).toHaveLength(17);
+  // The 25:19 is the accepted false best from Coruña 21, see the spec's Further Notes.
+  expect(status.data.allTime).toMatchObject({ best5k: 25 * 60 + 19, best1k: 4 * 60 + 13, best10k: 53 * 60 + 6 });
   expect(lines).toEqual(Array(2).fill("Imported 289 activities and 289 files"));
 }, 120_000); // two imports of the real export parse every file twice

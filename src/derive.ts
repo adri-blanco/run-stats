@@ -1,13 +1,14 @@
 import { Decoder, Stream } from "@garmin/fitsdk";
 import { XMLParser, XMLValidator } from "fast-xml-parser";
 import { gunzipSync } from "fflate";
-import type { Store, TimeAtBpm } from "./store";
+import type { BestEffort, Store, TimeAtBpm } from "./store";
 
 // Bump when parsing or derivation changes: generate then re-derives every older row from its stored file.
-export const DERIVE_VERSION = 1;
+export const DERIVE_VERSION = 2;
 
 const MAX_SAMPLE_S = 10;
 const EARTH_RADIUS_M = 6371000;
+const EFFORT_DISTANCES_M = [1000, 5000, 10000];
 
 const xml = new XMLParser({ ignoreAttributes: false, removeNSPrefix: true });
 
@@ -92,17 +93,34 @@ function timeAtBpm(samples: Sample[]): TimeAtBpm | null {
   return Object.keys(time).length ? time : null;
 }
 
+function bestEffort(samples: Sample[], distanceM: number): BestEffort | null {
+  const tracked = samples.filter((s) => s.distanceM !== null);
+  let best: BestEffort | null = null;
+  let from = 0;
+  for (const to of tracked) {
+    // The start only moves forward, because distance only grows along a track.
+    while (to.distanceM! - tracked[from + 1]!.distanceM! >= distanceM) from++;
+    const start = tracked[from]!;
+    const seconds = to.timeS - start.timeS;
+    if (to.distanceM! - start.distanceM! >= distanceM && (!best || seconds < best.seconds)) {
+      best = { distanceM, seconds, startOffsetS: start.timeS - samples[0]!.timeS };
+    }
+  }
+  return best;
+}
+
 export function deriveStale(store: Store, log: (line: string) => void): void {
-  for (const { id, startUtc, format, gz } of store.staleFiles(DERIVE_VERSION)) {
+  for (const { id, startUtc, type, format, gz } of store.staleFiles(DERIVE_VERSION)) {
     let samples: Sample[];
     try {
       samples = readSamples(format, gz);
     } catch (error) {
       const reason = error instanceof Error ? error.message : error;
       log(`Warning: can't read the ${format} file of the activity from ${startUtc}: ${reason}`);
-      store.saveDerived(id, null, 0);
+      store.saveDerived(id, null, [], 0);
       continue;
     }
-    store.saveDerived(id, timeAtBpm(samples), DERIVE_VERSION);
+    const efforts = type === "run" ? EFFORT_DISTANCES_M.flatMap((m) => bestEffort(samples, m) ?? []) : [];
+    store.saveDerived(id, timeAtBpm(samples), efforts, DERIVE_VERSION);
   }
 }
