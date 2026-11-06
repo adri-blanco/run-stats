@@ -36,6 +36,17 @@ small{color:var(--mute)}
 .big span,.big small{display:block}
 .big span{font-weight:600}
 .big small{font-size:13px}
+.groups{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:18px 24px;margin-top:10px}
+.groups h3,.recent{display:flex;align-items:center;min-height:28px;margin:0;font-size:12px;font-weight:800;letter-spacing:.1em;text-transform:uppercase;color:#d4ff5a}
+.race{padding:5px 0}
+.race b,.race small{display:block}
+.race b{font-weight:700}
+.lvl>div{display:flex;justify-content:space-between;gap:8px;padding:5px 0;border-bottom:1px solid #3d3590}
+.lvl span{color:#d9d6f3}
+.recent{margin-top:18px}
+.night a{color:inherit;text-underline-offset:2px}
+.night .acts th{color:#b9b4e6;border-color:#3d3590}
+.night .acts td{border-color:#3d3590}
 @media (max-width:1000px){.huge{grid-template-columns:repeat(3,1fr)}}
 @media (max-width:560px){.huge{grid-template-columns:1fr 1fr}.big:last-child{grid-column:span 2}}
 .more{all:unset;display:inline-block;cursor:pointer;margin-top:10px;padding:4px 12px;border:1px solid var(--line);border-radius:7px;font-size:13px}

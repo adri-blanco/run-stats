@@ -16,7 +16,7 @@ function duration(seconds: number): string {
 
 // Shorter than the table's durations: 25:19, not 0:25:19.
 const effort = (seconds: number | null) => (seconds === null ? "–" : duration(seconds).replace(/^0:0?/, ""));
-const km = (metres: number | null) => (metres === null ? "–" : (metres / 1000).toFixed(1));
+const km = (run: ActivityRow | null) => (run === null ? "–" : (run.distanceM / 1000).toFixed(1));
 
 function big(value: string, label: string, line: string): HTMLElement {
   return el("div", "big", el("b", "num", value), el("span", "", label), el("small", "", line));
@@ -27,14 +27,42 @@ function bigNumbers(level: CurrentLevel): HTMLElement[] {
     big(effort(level.best5k), "best 5K", `all-time ${effort(allTime.best5k)}`),
     big(effort(level.best10k), "best 10K", `all-time ${effort(allTime.best10k)}`),
     big(effort(level.best1k), "best 1K", `all-time ${effort(allTime.best1k)}`),
-    big(km(level.longestRunM), "km longest run", `all-time ${km(allTime.longestRunM)} km`),
+    big(km(level.longestRun), "km longest run", `all-time ${km(allTime.longestRun)} km`),
     big(String(level.longRuns), "long runs", `in ${level.weeksWithLongRun} of ${level.weeks} weeks`),
+  ];
+}
+
+function card(heading: string, a: ActivityRow | null): HTMLElement {
+  if (!a) return el("div", "", el("h3", "", heading), el("small", "", "–"));
+  const facts: [string, string][] = [
+    ["Distance", `${km(a)} km`],
+    ["Time", effort(a.movingS)],
+    ["Pace", a.paceSPerKm === null ? "–" : `${pace(a.paceSPerKm)} /km`],
+    ["Time stopped", effort(a.stoppedS)],
+  ];
+  return el(
+    "div",
+    "",
+    el("h3", "", heading),
+    el("div", "race", el("b", "", activityLink(a)), el("small", "", a.date)),
+    el("div", "lvl num", ...facts.map(([label, value]) => el("div", "", el("span", "", label), el("b", "", value)))),
+  );
+}
+
+function cards(level: CurrentLevel): HTMLElement[] {
+  return [
+    card("Fastest 5K race", allTime.fastest5kRace),
+    card("Fastest 7K race", allTime.fastest7kRace),
+    card("Fastest 10K race", allTime.fastest10kRace),
+    card("Longest run", level.longestRun),
   ];
 }
 
 function rightNow(): HTMLElement[] {
   const options: [Period, string][] = [["3w", "3 wk"], ["8w", "8 wk"], ["3m", "3 mo"], ["1y", "1 yr"], ["all", "All"]];
   const numbers = el("div", "huge");
+  const groups = el("div", "groups");
+  const recent = el("tbody", "");
   const buttons = options.map(([period, label]) => {
     const button = el("button", "", label);
     button.onclick = () => select(period);
@@ -47,12 +75,21 @@ function rightNow(): HTMLElement[] {
       button.setAttribute("aria-pressed", String(on));
     });
     numbers.replaceChildren(...bigNumbers(currentLevel[period]));
+    groups.replaceChildren(...cards(currentLevel[period]));
+    recent.replaceChildren(...currentLevel[period].recent.map(row));
   };
   select("8w");
   const selector = el("span", "seg", ...buttons);
   selector.setAttribute("role", "group");
   selector.setAttribute("aria-label", "Period");
-  return [el("div", "now", el("h2", "", "Right now"), selector), numbers];
+  const labels = el("tr", "", ...COLUMNS.map(({ label }) => el("th", "", label)));
+  return [
+    el("div", "now", el("h2", "", "Right now"), selector),
+    numbers,
+    groups,
+    el("h3", "recent", "Recent activities"),
+    el("table", "acts", el("thead", "", labels), recent),
+  ];
 }
 
 function pace(seconds: number): string {
