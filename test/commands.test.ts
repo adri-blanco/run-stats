@@ -1694,7 +1694,15 @@ describe("the generated Dashboard", () => {
     const hostile = `</script><script src="https://example.com/x.js"></script><link rel="stylesheet" href="//example.com/y.css">`;
     const data = await imported([{ title: hostile }]);
     const html = await Bun.file(deps().outPath).text();
-    expect(html).not.toMatch(/<(script|link)[^>]+(src|href)=/);
+    expect(html).not.toMatch(/<(script|link)[^>]+(src|href)=(?!["']?data:)/);
     expect(embeddedData(html)).toEqual(data);
+  });
+
+  test("embeds the favicon and the header logo", async () => {
+    await imported([{}]);
+    const html = await Bun.file(deps().outPath).text();
+    expect(html).toContain('<link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,');
+    expect(html).toContain('<link rel="icon" sizes="any" href="data:image/x-icon;base64,');
+    expect(html).toMatch(/<script type="module">.*<svg xmlns=/s);
   });
 });

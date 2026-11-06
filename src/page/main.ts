@@ -1,4 +1,5 @@
 import Chart, { type ChartDataset, type Plugin, type ScaleOptions, type TooltipItem } from "chart.js/auto";
+import logo from "../../design/logo/run-stats-header.svg";
 import type { Achievement, ActivityRow, CurrentLevel, DashboardData, Period, StreakBasis, TrendBucket } from "../metrics";
 
 const { activities, currentLevel, allTime, streaks, trends, achievements, meta }: DashboardData = JSON.parse(document.getElementById("data")!.textContent!);
@@ -621,7 +622,7 @@ document.getElementById("app")!.append(
     el(
       "div",
       "inner",
-      el("h1", "", "Adri's running"),
+      el("h1", "", Object.assign(new Image(), { src: `data:image/svg+xml,${encodeURIComponent(logo)}`, alt: "run stats" })),
       el("small", "", `${meta.runs} runs and ${meta.otherActivities} other activities${range}`),
       ...rightNow(),
     ),
