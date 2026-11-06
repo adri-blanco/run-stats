@@ -1,11 +1,11 @@
 import { Database } from "bun:sqlite";
 
 export type NewActivity = {
-  stravaId: string;
-  source: "strava";
+  stravaId: string | null;
+  source: "strava" | "polar";
   startUtc: string;
   type: string;
-  title: string;
+  title: string | null;
   tags: string;
   elapsedS: number;
   movingS: number;

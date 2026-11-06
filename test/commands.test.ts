@@ -2,10 +2,10 @@ import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Encoder, Profile } from "@garmin/fitsdk";
 import { gunzipSync, gzipSync, zipSync } from "fflate";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { generate, importExport } from "../src/commands";
+import { generate, importExport, refresh } from "../src/commands";
 
 const COLUMNS = 104;
 const VALID_SETTINGS = {
@@ -107,6 +107,193 @@ beforeEach(() => {
 });
 
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+// The assumed AccessLink v3 shape, in this one place. #29 checks it against the real API.
+function polarExercise(fields: Record<string, unknown> = {}) {
+  return {
+    id: "2AC312F",
+    start_time: "2026-11-05T09:00:00",
+    start_time_utc_offset: 60,
+    duration: "PT1H2M3S",
+    distance: 12000.5,
+    sport: "RUNNING",
+    detailed_sport_info: "RUNNING",
+    ...fields,
+  };
+}
+
+const POLAR_POINTS = [{ at: 0, bpm: 100, m: 0 }, { at: 5, bpm: 120, m: 600 }, { at: 10, bpm: 140, m: 1200 }];
+const POLAR_API = "https://www.polaraccesslink.com/v3/exercises";
+
+type PolarOptions = { fitBody?: string; respond?: (url: string) => Response | undefined; requests?: string[] };
+
+function polarDeps(exercises: unknown[], { fitBody, respond, requests }: PolarOptions = {}) {
+  return {
+    ...deps(),
+    polarToken: "fake-token",
+    fetch: async (url: string, init?: RequestInit) => {
+      if (new Headers(init?.headers).get("Authorization") !== "Bearer fake-token") return new Response(null, { status: 401 });
+      requests?.push(url);
+      const response = respond?.(url);
+      if (response) return response;
+      if (url === POLAR_API) return Response.json(exercises);
+      return new Response(fitBody ?? Buffer.from(gunzipSync(fit(POLAR_POINTS))));
+    },
+  };
+}
+
+async function refreshed(exercises: unknown[], options?: PolarOptions) {
+  const status = await refresh(polarDeps(exercises, options));
+  if (!status.ok) throw new Error(status.error);
+  return status.data;
+}
+
+describe("refresh", () => {
+  test("stores a new exercise as a Provisional activity, with heart rate and best efforts from its FIT file", async () => {
+    const requests: string[] = [];
+    const data = await refreshed([polarExercise()], { requests });
+
+    expect(data.activities).toEqual([
+      {
+        stravaId: null,
+        date: "2026-11-05",
+        title: null,
+        type: "run",
+        distanceM: 12000.5,
+        movingS: 3723,
+        stoppedS: 0,
+        paceSPerKm: 3723 / 12.0005,
+        avgHr: 110,
+        maxHr: 120,
+        race: false,
+        longRun: true,
+        sessionType: null,
+        sessionDetail: null,
+      },
+    ]);
+    expect(data.allTime.best1k).toBe(10);
+    expect(data.meta.awaitingStrava).toBe(1);
+    expect(requests).toEqual([POLAR_API, `${POLAR_API}/2AC312F/fit`]);
+  });
+
+  test("uses the UTC offset only to find the start, and groups by the settings time zone", async () => {
+    const data = await refreshed([polarExercise({ start_time: "2026-11-05T22:00:00", start_time_utc_offset: -300 })]);
+    expect(data.activities[0]!.date).toBe("2026-11-06");
+  });
+
+  test("skips an exercise within 60 s of a stored activity, and adds one just outside", async () => {
+    await imported([{ date: "5 nov 2026, 8:00:30", title: "On Strava" }]);
+    const data = await refreshed([
+      polarExercise({ id: "near", start_time: "2026-11-05T08:59:30" }),
+      polarExercise({ id: "far", start_time: "2026-11-05T08:59:29" }),
+    ]);
+    expect(data.activities.map((a) => a.title)).toEqual(["On Strava", null]);
+    expect(lines).toContain("Added 1 Provisional activities");
+  });
+
+  test("a second refresh adds nothing, and the page is still regenerated", async () => {
+    await refreshed([polarExercise()]);
+    rmSync(deps().outPath);
+    const data = await refreshed([polarExercise()]);
+    expect(data.activities).toHaveLength(1);
+    expect(await Bun.file(deps().outPath).exists()).toBe(true);
+  });
+
+  test("Long run comes from distance, and Provisional runs have no Race mark or Session type", async () => {
+    const data = await refreshed([
+      polarExercise({ id: "short", distance: 9000 }),
+      polarExercise({ id: "hike", start_time: "2026-11-04T09:00:00", detailed_sport_info: "HIKING" }),
+    ]);
+    expect(data.activities.map((a) => [a.type, a.longRun, a.race, a.sessionType])).toEqual([
+      ["run", false, false, null],
+      ["hike", false, false, null],
+    ]);
+    expect(data.meta.awaitingStrava).toBe(2);
+  });
+
+  test("an unknown Polar sport becomes other and is printed", async () => {
+    const data = await refreshed([polarExercise({ sport: "OTHER", detailed_sport_info: "WATERSPORTS_WATERSKI" })]);
+    expect(data.activities[0]!.type).toBe("other");
+    expect(lines).toContain(`Unknown Polar sport "WATERSPORTS_WATERSKI" on exercise 2AC312F, stored as other`);
+  });
+
+  test("an exercise with no distance is stored with 0", async () => {
+    const { distance, ...gym } = polarExercise({ detailed_sport_info: "STRENGTH_TRAINING" });
+    const data = await refreshed([gym]);
+    expect(data.activities[0]).toMatchObject({ type: "strength", distanceM: 0 });
+  });
+
+  test("warns when the newest stored activity is over 30 days old", async () => {
+    await imported([{ date: "7 oct 2026, 9:59:59" }]);
+    await refreshed([]);
+    expect(lines.join("\n")).toContain("Warning: the newest stored activity is over 30 days old");
+  });
+
+  test("doesn't warn at exactly 30 days, or on an empty store", async () => {
+    await refreshed([]);
+    await imported([{ date: "7 oct 2026, 10:00:00" }]);
+    await refreshed([]);
+    expect(lines.join("\n")).not.toContain("30 days");
+  });
+
+  test("a missing POLAR_ACCESS_TOKEN aborts with a clear message and calls nothing", async () => {
+    const requests: string[] = [];
+    const status = await refresh({ ...polarDeps([], { requests }), polarToken: undefined });
+    expect(status).toEqual({ ok: false, error: expect.stringContaining("POLAR_ACCESS_TOKEN") });
+    expect(requests).toEqual([]);
+  });
+
+  test("an auth failure partway through aborts and stores nothing", async () => {
+    await imported([{ title: "Kept" }]);
+    const status = await refresh(
+      polarDeps(
+        [polarExercise({ id: "first" }), polarExercise({ id: "second", start_time: "2026-11-04T09:00:00" })],
+        { respond: (url) => (url.includes("second") ? new Response(null, { status: 403 }) : undefined) },
+      ),
+    );
+    expect(status).toEqual({ ok: false, error: expect.stringContaining("403") });
+    const after = await generate(deps());
+    expect(after.ok && after.data.activities.map((a) => a.title)).toEqual(["Kept"]);
+  });
+
+  test("any other failed Polar request aborts too", async () => {
+    const status = await refresh(polarDeps([], { respond: () => new Response(null, { status: 500 }) }));
+    expect(status).toEqual({ ok: false, error: expect.stringContaining("500") });
+  });
+
+  test("rolls back when the page can't be written", async () => {
+    mkdirSync(deps().outPath, { recursive: true });
+    const status = await refresh(polarDeps([polarExercise()]));
+    expect(status.ok).toBe(false);
+    rmSync(deps().outPath, { recursive: true });
+    const after = await generate(deps());
+    expect(after.ok && after.data.activities).toEqual([]);
+  });
+
+  test("an exercise that doesn't have the assumed shape aborts rather than storing wrong values", async () => {
+    const badStart = await refresh(polarDeps([polarExercise({ start_time: "2026-11-05T09:00:00Z" })]));
+    expect(badStart).toEqual({ ok: false, error: expect.stringContaining("start time") });
+    const badDuration = await refresh(polarDeps([polarExercise({ duration: 3723 })]));
+    expect(badDuration).toEqual({ ok: false, error: expect.stringContaining("duration") });
+  });
+
+  test("a corrupt FIT file keeps the summary, warns, and stays retryable", async () => {
+    const data = await refreshed([polarExercise()], { fitBody: "not a fit file" });
+    expect(data.activities[0]).toMatchObject({ distanceM: 12000.5, avgHr: null });
+    expect(lines.join("\n")).toContain("Warning");
+
+    lines.length = 0;
+    await generate(deps());
+    expect(lines.join("\n")).toContain("Warning");
+  });
+
+  test("a later Bulk export replaces a Provisional activity once", async () => {
+    await refreshed([polarExercise()]);
+    const data = await imported([{ date: "5 nov 2026, 8:00:30", title: "From Strava" }]);
+    expect(data.activities.map((a) => a.title)).toEqual(["From Strava"]);
+    expect(data.meta.awaitingStrava).toBe(0);
+  });
+});
 
 describe("importExport", () => {
   test("stores an activity from a Bulk export and returns it in the DashboardData", async () => {
@@ -284,6 +471,16 @@ describe("best efforts", () => {
   test("uses the next sample past the target, with no interpolation", async () => {
     const data = await run([{ at: 0, m: 0 }, { at: 100, m: 900 }, { at: 200, m: 1100 }]);
     expect(data.allTime.best1k).toBe(200);
+  });
+
+  test.each([
+    ["the only sample", [{ at: 0, bpm: 120, m: 500 }]],
+    ["one of several", [{ at: 0, bpm: 120 }, { at: 60, bpm: 130, m: 500 }, { at: 120, bpm: 140 }]],
+  ])("a run with one distance sample, %s, imports without best efforts", async (_, points) => {
+    const data = await run(points);
+    expect(data.activities).toHaveLength(1);
+    expect(data.allTime.best1k).toBeNull();
+    expect(lines.join("\n")).not.toContain("Warning");
   });
 
   test.each([
@@ -926,6 +1123,95 @@ describe("achievements", () => {
   });
 });
 
+describe("heart-rate trends", () => {
+  // Each stint is [bpm, seconds], in steps of 10 s so no sample hits the cap.
+  function hrFile(stints: [number, number][]): Uint8Array {
+    const points: Point[] = [];
+    let at = 0;
+    for (const [bpm, seconds] of stints) {
+      for (let i = 0; i < seconds; i += 10, at += 10) points.push({ at, bpm });
+    }
+    return tcx([...points, { at, bpm: stints.at(-1)![0] }]);
+  }
+
+  const hrRun = (id: string, day: string, stints: [number, number][], row: Row = {}) => {
+    const file = `activities/${id}.tcx.gz`;
+    return { row: { id, date: `${day} 2026, 10:00:00`, file, ...row }, files: { [file]: hrFile(stints) } };
+  };
+
+  const importedHr = (...activities: { row: Row; files: Record<string, Uint8Array> }[]) =>
+    imported(activities.map((a) => a.row), Object.assign({}, ...activities.map((a) => a.files)));
+
+  test("time in zones covers every activity with HR, and time below Zone 1 is in no zone", async () => {
+    const data = await importedHr(
+      hrRun("1", "4 nov", [[90, 20], [100, 30], [139, 40], [180, 50]]),
+      hrRun("2", "5 nov", [[120, 100]], { type: "Senderismo" }),
+    );
+    expect(data.trends.month[0]?.zoneSeconds).toEqual([30, 140, 0, 0, 50]);
+  });
+
+  test("a zone change in settings is applied by generate with no import", async () => {
+    await importedHr(hrRun("1", "4 nov", [[130, 100]]));
+    writeFileSync(deps().settingsPath, JSON.stringify({ ...VALID_SETTINGS, hrZones: [100, 110, 120, 125, 180] }));
+
+    const status = await generate(deps());
+
+    expect(status.ok && status.data.trends.month[0]?.zoneSeconds).toEqual([0, 0, 0, 100, 0]);
+  });
+
+  test("efficiency is the mean of each run's moving metres per minute ÷ average HR", async () => {
+    const data = await importedHr(
+      hrRun("1", "2 nov", [[150, 100]], { distance: "6000", moving: "2400" }), // 150 m/min at 150 bpm: 1 m/beat
+      hrRun("2", "3 nov", [[100, 100]], { distance: "6000", moving: "1800" }), // 200 m/min at 100 bpm: 2 m/beat
+      hrRun("3", "4 nov", [[120, 100]], { type: "Senderismo", distance: "6000", moving: "6000" }),
+      { row: { id: "4", date: "5 nov 2026, 10:00:00", distance: "6000", moving: "6000" }, files: {} },
+    );
+    expect(data.trends.month[0]?.efficiency).toBe(1.5);
+  });
+
+  test("a run with HR but no distance gives no efficiency", async () => {
+    const data = await importedHr(hrRun("1", "2 nov", [[150, 100]], { distance: "0" }));
+    expect(data.trends.month[0]).toMatchObject({ efficiency: null, avgHr: 150 });
+  });
+
+  test("Zone 2 pace is the mean moving pace of runs over half their HR time in Zone 2", async () => {
+    const data = await importedHr(
+      hrRun("1", "2 nov", [[130, 60], [150, 40]], { distance: "1000", moving: "300" }),
+      hrRun("2", "3 nov", [[130, 100]], { distance: "1000", moving: "360" }),
+      hrRun("3", "4 nov", [[130, 50], [150, 50]], { distance: "1000", moving: "600" }), // exactly half
+      hrRun("4", "5 nov", [[130, 40], [90, 30], [150, 30]], { distance: "1000", moving: "600" }), // 40% of HR time, 57% of zoned time
+      hrRun("5", "6 nov", [[150, 100]], { title: "[Zone 2] easy", distance: "1000", moving: "600" }),
+      hrRun("6", "1 nov", [[130, 100]], { type: "Senderismo", distance: "1000", moving: "600" }),
+    );
+    expect(data.trends.month[0]?.zone2PaceSPerKm).toBe(330);
+  });
+
+  test("average HR is the mean of the averages of runs with HR, and non-runs add nothing", async () => {
+    const data = await importedHr(
+      hrRun("1", "2 nov", [[120, 100]]),
+      hrRun("2", "3 nov", [[160, 300]]),
+      hrRun("3", "4 nov", [[100, 100]], { type: "Senderismo" }),
+    );
+    expect(data.trends.month[0]?.avgHr).toBe(140);
+  });
+
+  test("HR values are null for a bucket with no data, not zero", async () => {
+    const data = await importedHr(
+      hrRun("1", "4 nov", [[150, 100]]),
+      { row: { id: "2", date: "4 sept 2026, 10:00:00" }, files: {} },
+    );
+    const noData = { zoneSeconds: null, efficiency: null, zone2PaceSPerKm: null, avgHr: null };
+    expect(data.trends.month[0]).toMatchObject(noData); // a run without HR
+    expect(data.trends.month[1]).toMatchObject(noData); // an empty month
+    expect(data.trends.month[2]).toMatchObject({ zone2PaceSPerKm: null }); // HR, but no Zone 2 run
+    expect(data.trends.month[2]?.avgHr).toBe(150);
+  });
+
+  test("the metadata says when the watch era starts", async () => {
+    expect((await imported([{}])).meta.watchEraStart).toBe("2024-08-23");
+  });
+});
+
 describe("a corrupt activity file", () => {
   const good = tcx([{ at: 0, bpm: 100 }, { at: 2, bpm: 100 }]);
 
@@ -1046,6 +1332,77 @@ describe("importing a later Bulk export", () => {
     expect(status.ok).toBe(false);
     const after = await generate(deps());
     expect(after.ok && after.data.activities.map((a) => a.title)).toEqual(["Stored"]);
+  });
+});
+
+describe("adopting Provisional activities", () => {
+  const stravaRow = { id: "9", date: "5 nov 2026, 8:00:30", title: "[Zone 2] From Strava", tags: "running|race", moving: "3500.0", elapsed: "3600.0", distance: "12.100,0" };
+
+  test("a start-time match becomes a Strava activity, with its Polar values and file gone", async () => {
+    await refreshed([polarExercise()]);
+
+    const data = await imported([stravaRow]);
+
+    expect(data.activities).toHaveLength(1);
+    expect(data.activities[0]).toMatchObject({
+      stravaId: "9",
+      title: "[Zone 2] From Strava",
+      sessionType: "Zone 2",
+      race: true,
+      longRun: true,
+      movingS: 3500,
+      stoppedS: 100,
+      distanceM: 12100,
+      avgHr: null,
+    });
+    expect(data.allTime.best1k).toBeNull();
+    expect(data.meta.awaitingStrava).toBe(0);
+    expect(lines.join("\n")).not.toContain("Kept");
+  });
+
+  test("the export's own file replaces the Polar one", async () => {
+    await refreshed([polarExercise()]);
+    const name = "activities/9.tcx.gz";
+    const data = await imported([{ ...stravaRow, file: name }], { [name]: tcx([{ at: 0, bpm: 150 }, { at: 5, bpm: 150 }, { at: 10, bpm: 151 }]) });
+    expect(data.activities[0]).toMatchObject({ avgHr: 150, maxHr: 150 });
+  });
+
+  test("unmatched ones stay as they are and are printed, even with nothing newer on Strava", async () => {
+    const strava = { id: "1", date: "4 nov 2026, 18:11:23", title: "Stored" };
+    await imported([strava]);
+    await refreshed([
+      polarExercise({ id: "newer", start_time: "2026-11-05T09:00:00" }),
+      polarExercise({ id: "older", start_time: "2026-11-03T09:00:00", detailed_sport_info: "HIKING" }),
+    ]);
+    lines = [];
+
+    const data = await imported([strava]);
+
+    expect(data.activities.map((a) => [a.date, a.title, a.type])).toEqual([
+      ["2026-11-05", null, "run"],
+      ["2026-11-04", "Stored", "run"],
+      ["2026-11-03", null, "hike"],
+    ]);
+    expect(data.activities[0]!.avgHr).not.toBeNull();
+    expect(data.meta.awaitingStrava).toBe(2);
+    expect(lines).toContain("Kept 2026-11-05 run, Provisional and not in the export");
+    expect(lines).toContain("Kept 2026-11-03 hike, Provisional and not in the export");
+  });
+
+  test("rolls back when the page can't be written, and prints no kept rows", async () => {
+    await refreshed([polarExercise(), polarExercise({ id: "older", start_time: "2026-11-03T09:00:00" })]);
+    writeFileSync(join(dir, "blocked"), "");
+    lines = [];
+
+    const zip = writeZip(exportZip([stravaRow]));
+    const status = await importExport(zip, { ...deps(), outPath: join(dir, "blocked", "dashboard.html") });
+
+    expect(status.ok).toBe(false);
+    expect(lines.join("\n")).not.toContain("Kept");
+    const after = await generate(deps());
+    if (!after.ok) throw new Error(after.error);
+    expect(after.data.activities.map((a) => [a.title, a.avgHr !== null])).toEqual([[null, true], [null, true]]);
+    expect(after.data.meta.awaitingStrava).toBe(2);
   });
 });
 
@@ -1172,7 +1529,9 @@ describe("generate", () => {
     expect(status.ok && status.data.meta).toEqual({
       generatedAt: "2026-11-06T10:00:00.000Z",
       timeZone: "Asia/Tokyo",
+      watchEraStart: "2024-08-23",
       newestActivity: "2026-11-05",
+      awaitingStrava: 0,
     });
   });
 

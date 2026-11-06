@@ -95,6 +95,7 @@ function timeAtBpm(samples: Sample[]): TimeAtBpm | null {
 
 function bestEffort(samples: Sample[], distanceM: number): BestEffort | null {
   const tracked = samples.filter((s) => s.distanceM !== null);
+  if (tracked.length < 2) return null;
   let best: BestEffort | null = null;
   let from = 0;
   for (const to of tracked) {

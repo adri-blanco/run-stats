@@ -54,6 +54,7 @@ small{color:var(--mute)}
 .lvl>div{display:flex;justify-content:space-between;gap:8px;padding:5px 0;border-bottom:1px solid #3d3590}
 .lvl span{color:#d9d6f3}
 .recent{margin-top:18px}
+.awaiting{display:block;margin-top:12px}
 .night a{color:inherit;text-underline-offset:2px}
 .night .acts th{color:#b9b4e6;border-color:#3d3590}
 .night .acts td{border-color:#3d3590}

@@ -5,6 +5,7 @@ import type { NewActivity, Store, StoredActivity } from "./store";
 
 const COLUMN = { id: 0, start: 1, title: 2, type: 3, file: 12, elapsed: 15, moving: 16, distance: 17, tags: 103 };
 const SAME_ACTIVITY_MS = 60_000;
+const POLAR_EXERCISES = "https://www.polaraccesslink.com/v3/exercises";
 const SPANISH_MONTHS = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sept", "oct", "nov", "dic"];
 const ACTIVITY_TYPES: Record<string, string> = {
   Carrera: "run",
@@ -14,6 +15,19 @@ const ACTIVITY_TYPES: Record<string, string> = {
   Natación: "swim",
   Kayak: "kayak",
   Fútbol: "football",
+};
+
+// Assumed names, which #29 checks live. A wrong guess stays visible, as other and printed.
+const POLAR_SPORTS: Record<string, string> = {
+  RUNNING: "run",
+  ROAD_RUNNING: "run",
+  TRAIL_RUNNING: "run",
+  TREADMILL_RUNNING: "run",
+  HIKING: "hike",
+  STRENGTH_TRAINING: "strength",
+  SWIMMING: "swim",
+  WATERSPORTS_KAYAKING: "kayak",
+  FOOTBALL: "football",
 };
 
 function startUtc(cell: string): string {
@@ -74,8 +88,69 @@ export function readBulkExport(zipPath: string, log: (line: string) => void): Ne
   });
 }
 
+export type Polar = { fetch: (url: string, init?: RequestInit) => Promise<Response>; token: string };
+
+type PolarExercise = {
+  id: string;
+  start_time: string;
+  start_time_utc_offset: number;
+  duration: string;
+  distance?: number;
+  sport: string;
+  detailed_sport_info?: string;
+};
+
+async function polarGet(polar: Polar, url: string, accept: string): Promise<Response> {
+  const response = await polar.fetch(url, { headers: { Authorization: `Bearer ${polar.token}`, Accept: accept } });
+  if (response.status === 401 || response.status === 403) {
+    throw new Error(`Polar refused POLAR_ACCESS_TOKEN (${response.status})`);
+  }
+  if (!response.ok) throw new Error(`Polar answered ${response.status} to ${url}`);
+  return response;
+}
+
+// start_time is the watch's local time, with its offset from UTC in minutes.
+function polarStartUtc({ id, start_time, start_time_utc_offset }: PolarExercise): string {
+  const ms = Date.parse(`${start_time}Z`) - start_time_utc_offset * 60_000;
+  if (Number.isNaN(ms)) throw new Error(`Unreadable start time on Polar exercise ${id}: "${start_time}", ${start_time_utc_offset}`);
+  return new Date(ms).toISOString();
+}
+
+function polarSeconds({ id, duration }: PolarExercise): number {
+  const m = String(duration).match(/^PT(?:(\d+)H)?(?:(\d+)M)?(?:([\d.]+)S)?$/);
+  if (!m) throw new Error(`Unreadable duration on Polar exercise ${id}: "${duration}"`);
+  return Number(m[1] ?? 0) * 3600 + Number(m[2] ?? 0) * 60 + Number(m[3] ?? 0);
+}
+
+export async function readPolarExercises(polar: Polar, stored: StoredActivity[], log: (line: string) => void): Promise<NewActivity[]> {
+  const exercises: PolarExercise[] = await (await polarGet(polar, POLAR_EXERCISES, "application/json")).json();
+  const activities: NewActivity[] = [];
+  for (const exercise of exercises) {
+    const start = polarStartUtc(exercise);
+    if (stored.some((row) => Math.abs(Date.parse(row.startUtc) - Date.parse(start)) <= SAME_ACTIVITY_MS)) continue;
+    const sport = exercise.detailed_sport_info ?? exercise.sport;
+    const type = POLAR_SPORTS[sport];
+    if (!type) log(`Unknown Polar sport "${sport}" on exercise ${exercise.id}, stored as other`);
+    const seconds = polarSeconds(exercise);
+    const fit = await polarGet(polar, `${POLAR_EXERCISES}/${exercise.id}/fit`, "*/*");
+    activities.push({
+      stravaId: null,
+      source: "polar",
+      startUtc: start,
+      type: type ?? "other",
+      title: null,
+      tags: "",
+      elapsedS: seconds,
+      movingS: seconds,
+      distanceM: exercise.distance ?? 0,
+      file: { format: "fit", gz: gzipSync(new Uint8Array(await fit.arrayBuffer())) },
+    });
+  }
+  return activities;
+}
+
 // shortcut: an overwrite drops the stored file if the new zip lacks it (the import warns), keep it once #18 can show it.
-export function storeExport(store: Store, activities: NewActivity[]): StoredActivity[] {
+export function storeExport(store: Store, activities: NewActivity[]): { missing: StoredActivity[]; kept: StoredActivity[] } {
   const stored = store.activities();
   const newest = (rows: { startUtc: string }[]) => rows.map((row) => row.startUtc).sort().at(-1) ?? "";
   const newestStored = newest(stored.filter((row) => row.source === "strava"));
@@ -97,5 +172,5 @@ export function storeExport(store: Store, activities: NewActivity[]): StoredActi
   // Removing cascades to files and derived rows, so an overwrite can't keep stale ones.
   store.remove(stored.filter((row) => !unmatched.includes(row)).concat(missing).map((row) => row.id));
   store.insertAll(activities);
-  return missing;
+  return { missing, kept: unmatched.filter((row) => row.source === "polar") };
 }
