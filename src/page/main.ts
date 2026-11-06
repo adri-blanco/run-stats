@@ -1,7 +1,7 @@
 import Chart, { type ChartDataset, type Plugin, type ScaleOptions, type TooltipItem } from "chart.js/auto";
 import type { ActivityRow, CurrentLevel, DashboardData, Period, TrendBucket } from "../metrics";
 
-const { activities, currentLevel, allTime, trends }: DashboardData = JSON.parse(document.getElementById("data")!.textContent!);
+const { meta, activities, currentLevel, allTime, trends }: DashboardData = JSON.parse(document.getElementById("data")!.textContent!);
 
 function el(tag: string, className: string, ...children: (Node | string)[]): HTMLElement {
   const node = document.createElement(tag);
@@ -228,6 +228,21 @@ const PINK = "#e0257f";
 // One width for every chart, so their plots start at the same x and the time axes line up.
 const Y_AXIS_WIDTH = 64;
 const HALF_MARATHON_KM = 21.1;
+const ZONE_COLORS = ["#cfd8e3", "#8fc1a9", "#efcf6b", "#e8964e", "#c8421f"];
+
+// Shades whole phone buckets only: the bucket the watch era starts in may hold HR data.
+const phoneEra: Plugin = {
+  id: "phoneEra",
+  beforeDraw({ ctx, data, chartArea: { left, top, height }, scales }) {
+    // A month key sorts before any date in that month, so this also finds the month holding the start.
+    const watchBucket = (data.labels as string[]).findLastIndex((key) => key <= meta.watchEraStart);
+    if (watchBucket < 1) return;
+    ctx.save();
+    ctx.fillStyle = "#eceef1";
+    ctx.fillRect(left, top, scales.x!.getPixelForValue(watchBucket - 0.5) - left, height);
+    ctx.restore();
+  },
+};
 
 const halfMarathonLine: Plugin = {
   id: "halfMarathonLine",
@@ -270,6 +285,8 @@ type TrendChart = {
   tooltip: (item: TooltipItem<"bar" | "line">) => string;
   y?: ScaleOptions<"linear">;
   legend?: boolean;
+  stacked?: boolean;
+  topPadding?: number;
   plugins?: Plugin[];
 };
 
@@ -291,6 +308,11 @@ function effortLine(buckets: TrendBucket[], label: string, field: "best5k" | "be
     pointRadius: buckets.map((bucket) => (bucket[field]?.race ? 6 : 2.5)),
   };
 }
+
+// Left unconnected across null buckets, so missing HR reads as a gap and not as a fall.
+const hrLine = (buckets: TrendBucket[], value: (bucket: TrendBucket) => number | null, color: string): ChartDataset[] => [
+  { data: buckets.map(value), borderColor: color, backgroundColor: color, borderWidth: 2, pointRadius: 2.5 },
+];
 
 const TREND_CHARTS: TrendChart[] = [
   {
@@ -324,16 +346,54 @@ const TREND_CHARTS: TrendChart[] = [
     legend: true,
     plugins: [fasterUp],
   },
+  {
+    title: "Time in zones",
+    note: "hours per period, activities with HR",
+    type: "bar",
+    datasets: (buckets) =>
+      ZONE_COLORS.map((color, zone) => ({
+        label: `Z${zone + 1}`,
+        data: buckets.map((bucket) => (bucket.zoneSeconds ? bucket.zoneSeconds[zone]! / 3600 : null)),
+        backgroundColor: color,
+      })),
+    tooltip: (item) => `${item.dataset.label}: ${item.parsed.y!.toFixed(1)} h`,
+    legend: true,
+    stacked: true,
+  },
+  {
+    title: "Efficiency",
+    note: "metres per heartbeat, up is better",
+    type: "line",
+    datasets: (buckets) => hrLine(buckets, (bucket) => bucket.efficiency, VIOLET),
+    tooltip: (item) => `${item.parsed.y!.toFixed(2)} m/beat`,
+  },
+  {
+    title: "Zone 2 pace",
+    note: "min/km, runs over half in Zone 2, up is faster",
+    type: "line",
+    datasets: (buckets) => hrLine(buckets, (bucket) => bucket.zone2PaceSPerKm, VIOLET),
+    tooltip: (item) => `${pace(item.parsed.y!)} /km`,
+    y: { reverse: true, ticks: { stepSize: 30, callback: (value) => pace(Number(value)) } } as ScaleOptions<"linear">,
+    topPadding: 26,
+    plugins: [fasterUp],
+  },
+  {
+    title: "Average HR",
+    note: "bpm, runs with HR",
+    type: "line",
+    datasets: (buckets) => hrLine(buckets, (bucket) => bucket.avgHr, PINK),
+    tooltip: (item) => `${Math.round(item.parsed.y!)} bpm`,
+  },
 ];
 
 function trendChart(def: TrendChart, canvas: HTMLCanvasElement): Chart {
   return new Chart(canvas, {
     type: def.type,
     data: { datasets: [] },
-    plugins: def.plugins ?? [],
+    plugins: [phoneEra, ...(def.plugins ?? [])],
     options: {
       // autoPadding would inset line charts by their point size and break the shared axis.
-      layout: { autoPadding: false },
+      layout: { autoPadding: false, padding: { top: def.topPadding ?? 0 } },
       interaction: { mode: "index", intersect: false },
       plugins: {
         legend: { display: !!def.legend, position: "top", align: "end", labels: { boxWidth: 9, boxHeight: 9, padding: 6 } },
@@ -348,6 +408,7 @@ function trendChart(def: TrendChart, canvas: HTMLCanvasElement): Chart {
         // offset keeps line points over the bars' centres, on the same x as every other chart.
         x: {
           offset: true,
+          stacked: def.stacked,
           grid: { display: false },
           ticks: {
             maxTicksLimit: 9,
@@ -358,6 +419,7 @@ function trendChart(def: TrendChart, canvas: HTMLCanvasElement): Chart {
           },
         },
         y: {
+          stacked: def.stacked,
           grid: { color: "#eee" },
           ticks: { maxTicksLimit: 5 },
           afterFit: (scale) => void (scale.width = Y_AXIS_WIDTH),
@@ -399,6 +461,7 @@ function theStorySoFar(): HTMLElement[] {
   selector.setAttribute("aria-label", "Chart period");
   return [
     el("h2", "story", "The story so far"),
+    el("small", "", "Grey area: phone era, no heart rate."),
     el("div", "filters", selector),
     ...TREND_CHARTS.map((def, i) =>
       el(
