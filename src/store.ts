@@ -13,7 +13,7 @@ export type NewActivity = {
   file: { format: string; gz: Uint8Array } | null;
 };
 
-export type StoredActivity = Pick<NewActivity, "startUtc" | "type" | "title" | "distanceM" | "movingS">;
+export type StoredActivity = Pick<NewActivity, "startUtc" | "type" | "title" | "tags" | "distanceM" | "movingS">;
 
 export type Store = {
   insertAll(activities: NewActivity[]): void;
@@ -64,7 +64,7 @@ export async function withStore<T>(path: string, use: (store: Store) => Promise<
       activities: () =>
         db
           .query(
-            `SELECT start_utc AS startUtc, type, title, distance_m AS distanceM, moving_s AS movingS
+            `SELECT start_utc AS startUtc, type, title, tags, distance_m AS distanceM, moving_s AS movingS
              FROM activity ORDER BY start_utc DESC`,
           )
           .all() as StoredActivity[],

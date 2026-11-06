@@ -12,7 +12,7 @@ const VALID_SETTINGS = {
   firstBarrierSeconds: { "1K": [300, 270, 240], "5K": [1800, 1650, 1500], "10K": [3600, 3300, 3000] },
 };
 
-type Row = { id?: string; date?: string; title?: string; type?: string; file?: string; moving?: string; distance?: string };
+type Row = { id?: string; date?: string; title?: string; type?: string; file?: string; moving?: string; distance?: string; tags?: string };
 
 function csvRow(row: Row): string {
   const cells = Array<string>(COLUMNS).fill("");
@@ -24,7 +24,7 @@ function csvRow(row: Row): string {
   cells[15] = "2577.0";
   cells[16] = row.moving ?? "2515.0";
   cells[17] = row.distance ?? "6062.6";
-  cells[103] = "running";
+  cells[103] = row.tags ?? "running";
   return cells.map((cell) => `"${cell.replaceAll('"', '""')}"`).join(",");
 }
 
@@ -72,7 +72,17 @@ describe("importExport", () => {
   test("stores an activity from a Bulk export and returns it in the DashboardData", async () => {
     const data = await imported([{ title: "Correr por correr" }]);
     expect(data.activities).toEqual([
-      { date: "2026-11-04", title: "Correr por correr", type: "run", distanceM: 6062.6, movingS: 2515 },
+      {
+        date: "2026-11-04",
+        title: "Correr por correr",
+        type: "run",
+        distanceM: 6062.6,
+        movingS: 2515,
+        race: false,
+        longRun: false,
+        sessionType: null,
+        sessionDetail: null,
+      },
     ]);
   });
 
@@ -169,6 +179,81 @@ describe("importExport", () => {
     expect(await Bun.file(deps().outPath).text()).toBe(page);
     const after = await generate(deps());
     expect(after.ok && after.data.activities.map((a) => a.title)).toEqual(["Kept"]);
+  });
+});
+
+describe("marks", () => {
+  test.each([
+    ["race", true],
+    ["running|race", true],
+    ["running|workout", false],
+    ["running|race-pace", false],
+    ["", false],
+  ])("a run tagged %j has race %j", async (tags, race) => {
+    const data = await imported([{ tags, title: "Morning run" }]);
+    expect(data.activities[0]!.race).toBe(race);
+  });
+
+  test.each([
+    [10000, true],
+    [9999.9, false],
+  ])("a run of %d m has longRun %j", async (metres, longRun) => {
+    const data = await imported([{ distance: String(metres) }]);
+    expect(data.activities[0]!.longRun).toBe(longRun);
+  });
+
+  test("a race of 10 km or more is also a Long run", async () => {
+    const data = await imported([{ tags: "race", distance: "10.100,0" }]);
+    expect(data.activities[0]).toMatchObject({ race: true, longRun: true });
+  });
+
+  test("a shorter run labelled Long Run is not a Long run", async () => {
+    const data = await imported([{ title: "[Long Run] Easy", distance: "8000" }]);
+    expect(data.activities[0]!.longRun).toBe(false);
+  });
+
+  test.each([
+    ["6x1km", "Intervals"],
+    ["6x1Km", "Intervals"],
+    ["2x3km", "Intervals"],
+    ["10x200", "Intervals"],
+    ["4x600m", "Intervals"],
+    ["Fartlek", "Fartlek"],
+    ["Fartlek 2x3-2-1", "Fartlek"],
+    ["Fartlek 3x(3-2-1)", "Fartlek"],
+    ["3x3-2-1", "Fartlek"],
+    ["3x(3-2-1)", "Fartlek"],
+    ["Hillsx8", "Hills"],
+    ["5xHills", "Hills"],
+    ["7xHills", "Hills"],
+    ["Zone 2", "Zone 2"],
+    ["Zona 2", "Zone 2"],
+    ["~Zone 2", "Zone 2"],
+    ["Hiit", "HIIT"],
+    ["Running test", "Running test"],
+    ["RT", "Running test"],
+    ["Long Run", "Long run"],
+  ])("the label [%s] gives the Session type %s and keeps its text as detail", async (label, sessionType) => {
+    const data = await imported([{ title: `[${label}] Riverside` }]);
+    expect(data.activities[0]).toMatchObject({ sessionType, sessionDetail: label });
+  });
+
+  test.each(["[Ro]", "[Coruña Corre]", "[5K]", "[Zone 1-3]", "[V]", "[GPS]", "[]", "Coruña 21 [6x1km]", " [Zone 2]", "Zone 2"])(
+    "the title %j gives no Session type",
+    async (title) => {
+      const data = await imported([{ title }]);
+      expect(data.activities[0]).toMatchObject({ sessionType: null, sessionDetail: null });
+    },
+  );
+
+  test("a non-run activity gets no marks, whatever its tags, title and distance", async () => {
+    const data = await imported([{ type: "Senderismo", tags: "race", title: "[Zone 2] Hills", distance: "12000" }]);
+    expect(data.activities[0]).toMatchObject({ race: false, longRun: false, sessionType: null, sessionDetail: null });
+  });
+
+  test("a title can't make a run a race", async () => {
+    const data = await imported([{ title: "Race day [race]" }]);
+    expect(data.activities[0]!.race).toBe(false);
   });
 });
 

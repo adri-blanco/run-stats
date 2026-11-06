@@ -1,12 +1,38 @@
 import type { Settings } from "./settings";
 import type { StoredActivity } from "./store";
 
-export type ActivityRow = { date: string; title: string; type: string; distanceM: number; movingS: number };
+export type ActivityRow = {
+  date: string;
+  title: string;
+  type: string;
+  distanceM: number;
+  movingS: number;
+  race: boolean;
+  longRun: boolean;
+  sessionType: string | null;
+  sessionDetail: string | null;
+};
 
 export type DashboardData = {
   meta: { generatedAt: string; timeZone: string; newestActivity: string | null };
   activities: ActivityRow[];
 };
+
+const SESSION_TYPES: [string, RegExp][] = [
+  ["Intervals", /^\d+x\d+(k?m)?$/i],
+  ["Fartlek", /^(fartlek|\d+x\(?\d+(-\d+)+\)?$)/i],
+  ["Hills", /^(hillsx\d+|\d+xhills)$/i],
+  ["Zone 2", /^~?zon[ea] 2$/i],
+  ["HIIT", /^hiit$/i],
+  ["Running test", /^(running test|rt)$/i],
+  ["Long run", /^long run$/i],
+];
+
+function session(title: string): Pick<ActivityRow, "sessionType" | "sessionDetail"> {
+  const label = title.match(/^\[(.*?)\]/)?.[1] ?? "";
+  const sessionType = SESSION_TYPES.find(([, pattern]) => pattern.test(label))?.[0] ?? null;
+  return { sessionType, sessionDetail: sessionType && label };
+}
 
 export function buildDashboardData(stored: StoredActivity[], settings: Settings, now: Date): DashboardData {
   const localDate = new Intl.DateTimeFormat("en-CA", {
@@ -15,12 +41,15 @@ export function buildDashboardData(stored: StoredActivity[], settings: Settings,
     month: "2-digit",
     day: "2-digit",
   });
-  const activities = stored.map(({ startUtc, type, title, distanceM, movingS }) => ({
+  const activities = stored.map(({ startUtc, type, title, tags, distanceM, movingS }) => ({
     date: localDate.format(new Date(startUtc)),
     title,
     type,
     distanceM,
     movingS,
+    race: type === "run" && tags.split("|").includes("race"),
+    longRun: type === "run" && distanceM >= 10_000,
+    ...session(type === "run" ? title : ""),
   }));
   return {
     meta: {
