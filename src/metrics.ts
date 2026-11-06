@@ -9,6 +9,10 @@ export type ActivityRow = {
   movingS: number;
   avgHr: number | null;
   maxHr: number | null;
+  race: boolean;
+  longRun: boolean;
+  sessionType: string | null;
+  sessionDetail: string | null;
 };
 
 export type DashboardData = {
@@ -24,6 +28,22 @@ function heartRate(timeAtBpm: TimeAtBpm | null): Pick<ActivityRow, "avgHr" | "ma
   return { avgHr: beats / total, maxHr: Math.max(...entries.map(([bpm]) => bpm)) };
 }
 
+const SESSION_TYPES: [string, RegExp][] = [
+  ["Intervals", /^\d+x\d+(k?m)?$/i],
+  ["Fartlek", /^(fartlek|\d+x\(?\d+(-\d+)+\)?$)/i],
+  ["Hills", /^(hillsx\d+|\d+xhills)$/i],
+  ["Zone 2", /^~?zon[ea] 2$/i],
+  ["HIIT", /^hiit$/i],
+  ["Running test", /^(running test|rt)$/i],
+  ["Long run", /^long run$/i],
+];
+
+function session(title: string): Pick<ActivityRow, "sessionType" | "sessionDetail"> {
+  const label = title.match(/^\[(.*?)\]/)?.[1] ?? "";
+  const sessionType = SESSION_TYPES.find(([, pattern]) => pattern.test(label))?.[0] ?? null;
+  return { sessionType, sessionDetail: sessionType && label };
+}
+
 export function buildDashboardData(stored: StoredActivity[], settings: Settings, now: Date): DashboardData {
   const localDate = new Intl.DateTimeFormat("en-CA", {
     timeZone: settings.timeZone,
@@ -31,13 +51,16 @@ export function buildDashboardData(stored: StoredActivity[], settings: Settings,
     month: "2-digit",
     day: "2-digit",
   });
-  const activities = stored.map(({ startUtc, type, title, distanceM, movingS, timeAtBpm }) => ({
+  const activities = stored.map(({ startUtc, type, title, tags, distanceM, movingS, timeAtBpm }) => ({
     date: localDate.format(new Date(startUtc)),
     title,
     type,
     distanceM,
     movingS,
     ...heartRate(timeAtBpm),
+    race: type === "run" && tags.split("|").includes("race"),
+    longRun: type === "run" && distanceM >= 10_000,
+    ...session(type === "run" ? title : ""),
   }));
   return {
     meta: {

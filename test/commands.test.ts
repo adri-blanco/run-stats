@@ -14,7 +14,7 @@ const VALID_SETTINGS = {
   firstBarrierSeconds: { "1K": [300, 270, 240], "5K": [1800, 1650, 1500], "10K": [3600, 3300, 3000] },
 };
 
-type Row = { id?: string; date?: string; title?: string; type?: string; file?: string; moving?: string; distance?: string };
+type Row = { id?: string; date?: string; title?: string; type?: string; file?: string; moving?: string; distance?: string; tags?: string };
 
 function csvRow(row: Row): string {
   const cells = Array<string>(COLUMNS).fill("");
@@ -26,7 +26,7 @@ function csvRow(row: Row): string {
   cells[15] = "2577.0";
   cells[16] = row.moving ?? "2515.0";
   cells[17] = row.distance ?? "6062.6";
-  cells[103] = "running";
+  cells[103] = row.tags ?? "running";
   return cells.map((cell) => `"${cell.replaceAll('"', '""')}"`).join(",");
 }
 
@@ -117,6 +117,10 @@ describe("importExport", () => {
         movingS: 2515,
         avgHr: null,
         maxHr: null,
+        race: false,
+        longRun: false,
+        sessionType: null,
+        sessionDetail: null,
       },
     ]);
   });
@@ -274,6 +278,175 @@ describe("a corrupt activity file", () => {
     lines = [];
     await generate(deps());
     expect(lines.filter((line) => line.startsWith("Warning"))).toHaveLength(1);
+  });
+});
+
+describe("importing a later Bulk export", () => {
+  test("overwrites an activity with the same strava_id, so a title edited on Strava flows in", async () => {
+    await imported([{ id: "1", title: "Morning run" }]);
+    const data = await imported([{ id: "1", title: "Edited on Strava" }]);
+    expect(data.activities.map((a) => a.title)).toEqual(["Edited on Strava"]);
+  });
+
+  test("overwrites an activity with a new strava_id that starts within 60 s", async () => {
+    await imported([{ id: "1", date: "1 ene 2025, 10:00:00", title: "Before" }]);
+    const data = await imported([{ id: "2", date: "1 ene 2025, 10:01:00", title: "Re-uploaded" }]);
+    expect(data.activities.map((a) => a.title)).toEqual(["Re-uploaded"]);
+    expect(lines.join("\n")).not.toContain("Before");
+  });
+
+  test("matches on strava_id before start time, so a new activity can't take a neighbour's place", async () => {
+    await imported([{ id: "1", date: "1 ene 2025, 10:00:00", title: "Old title" }]);
+    const data = await imported([
+      { id: "2", date: "1 ene 2025, 10:00:30", title: "New neighbour" },
+      { id: "1", date: "1 ene 2025, 10:00:00", title: "New title" },
+    ]);
+    expect(data.activities.map((a) => a.title)).toEqual(["New neighbour", "New title"]);
+  });
+
+  test("deletes and prints a Strava activity missing from the export", async () => {
+    await imported([
+      { id: "1", date: "1 ene 2025, 10:00:00", title: "Removed on Strava" },
+      { id: "2", date: "1 feb 2025, 10:00:00", title: "Still there" },
+    ]);
+    const data = await imported([{ id: "2", date: "1 feb 2025, 10:00:00", title: "Still there" }]);
+    expect(data.activities.map((a) => a.title)).toEqual(["Still there"]);
+    expect(lines).toContainEqual(expect.stringContaining("Removed on Strava"));
+    expect(lines).toContainEqual(expect.stringContaining("2025-01-01"));
+  });
+
+  test("does not match an activity that starts more than 60 s away", async () => {
+    await imported([{ id: "1", date: "1 ene 2025, 10:00:00", title: "Before" }]);
+    await imported([{ id: "2", date: "1 ene 2025, 10:01:01", title: "Different session" }]);
+    expect(lines).toContainEqual(expect.stringContaining("Before"));
+  });
+
+  test("imports the same export twice without changing or printing anything", async () => {
+    const rows = [
+      { id: "1", date: "1 ene 2025, 10:00:00", title: "One" },
+      { id: "2", date: "1 ene 2025, 10:00:30", title: "Two" },
+    ];
+    const first = await imported(rows);
+    lines = [];
+    const second = await imported(rows);
+    expect(second.activities).toEqual(first.activities);
+    expect(lines).toEqual(["Imported 2 activities and 0 files"]);
+  });
+
+  test.each([
+    ["older", exportZip([{ id: "1", date: "1 ene 2025, 09:59:59" }])],
+    ["empty", exportZip([])],
+  ])("refuses an %s export and changes nothing", async (_, zip) => {
+    await imported([{ id: "1", date: "1 ene 2025, 10:00:00", title: "Kept" }]);
+    const page = await Bun.file(deps().outPath).text();
+
+    const status = await importExport(writeZip(zip), deps());
+
+    expect(status).toEqual({ ok: false, error: expect.stringContaining("Refused") });
+    expect(await Bun.file(deps().outPath).text()).toBe(page);
+    const after = await generate(deps());
+    expect(after.ok && after.data.activities.map((a) => a.title)).toEqual(["Kept"]);
+  });
+
+  test("rolls back overwrites and deletions when a later row fails", async () => {
+    const older = { id: "1", date: "1 ene 2025, 10:00:00", title: "Old" };
+    const newer = { id: "2", date: "1 feb 2025, 10:00:00", title: "New" };
+    await imported([older, newer]);
+
+    const zip = exportZip([{ ...newer, title: "Edited" }, { ...newer, title: "Twice" }]);
+    const status = await importExport(writeZip(zip), deps());
+
+    expect(status.ok).toBe(false);
+    const after = await generate(deps());
+    expect(after.ok && after.data.activities.map((a) => a.title)).toEqual(["New", "Old"]);
+  });
+
+  test("rolls everything back when the page can't be written", async () => {
+    const row = { id: "1", title: "Stored" };
+    await imported([row]);
+    writeFileSync(join(dir, "blocked"), "");
+
+    const zip = writeZip(exportZip([{ ...row, title: "Edited" }]));
+    const status = await importExport(zip, { ...deps(), outPath: join(dir, "blocked", "dashboard.html") });
+
+    expect(status.ok).toBe(false);
+    const after = await generate(deps());
+    expect(after.ok && after.data.activities.map((a) => a.title)).toEqual(["Stored"]);
+  });
+});
+
+describe("marks", () => {
+  test.each([
+    ["race", true],
+    ["running|race", true],
+    ["running|workout", false],
+    ["running|race-pace", false],
+    ["", false],
+  ])("a run tagged %j has race %j", async (tags, race) => {
+    const data = await imported([{ tags, title: "Morning run" }]);
+    expect(data.activities[0]!.race).toBe(race);
+  });
+
+  test.each([
+    [10000, true],
+    [9999.9, false],
+  ])("a run of %d m has longRun %j", async (metres, longRun) => {
+    const data = await imported([{ distance: String(metres) }]);
+    expect(data.activities[0]!.longRun).toBe(longRun);
+  });
+
+  test("a race of 10 km or more is also a Long run", async () => {
+    const data = await imported([{ tags: "race", distance: "10.100,0" }]);
+    expect(data.activities[0]).toMatchObject({ race: true, longRun: true });
+  });
+
+  test("a shorter run labelled Long Run is not a Long run", async () => {
+    const data = await imported([{ title: "[Long Run] Easy", distance: "8000" }]);
+    expect(data.activities[0]!.longRun).toBe(false);
+  });
+
+  test.each([
+    ["6x1km", "Intervals"],
+    ["6x1Km", "Intervals"],
+    ["2x3km", "Intervals"],
+    ["10x200", "Intervals"],
+    ["4x600m", "Intervals"],
+    ["Fartlek", "Fartlek"],
+    ["Fartlek 2x3-2-1", "Fartlek"],
+    ["Fartlek 3x(3-2-1)", "Fartlek"],
+    ["3x3-2-1", "Fartlek"],
+    ["3x(3-2-1)", "Fartlek"],
+    ["Hillsx8", "Hills"],
+    ["5xHills", "Hills"],
+    ["7xHills", "Hills"],
+    ["Zone 2", "Zone 2"],
+    ["Zona 2", "Zone 2"],
+    ["~Zone 2", "Zone 2"],
+    ["Hiit", "HIIT"],
+    ["Running test", "Running test"],
+    ["RT", "Running test"],
+    ["Long Run", "Long run"],
+  ])("the label [%s] gives the Session type %s and keeps its text as detail", async (label, sessionType) => {
+    const data = await imported([{ title: `[${label}] Riverside` }]);
+    expect(data.activities[0]).toMatchObject({ sessionType, sessionDetail: label });
+  });
+
+  test.each(["[Ro]", "[Coruña Corre]", "[5K]", "[Zone 1-3]", "[V]", "[GPS]", "[]", "Coruña 21 [6x1km]", " [Zone 2]", "Zone 2"])(
+    "the title %j gives no Session type",
+    async (title) => {
+      const data = await imported([{ title }]);
+      expect(data.activities[0]).toMatchObject({ sessionType: null, sessionDetail: null });
+    },
+  );
+
+  test("a non-run activity gets no marks, whatever its tags, title and distance", async () => {
+    const data = await imported([{ type: "Senderismo", tags: "race", title: "[Zone 2] Hills", distance: "12000" }]);
+    expect(data.activities[0]).toMatchObject({ race: false, longRun: false, sessionType: null, sessionDetail: null });
+  });
+
+  test("a title can't make a run a race", async () => {
+    const data = await imported([{ title: "Race day [race]" }]);
+    expect(data.activities[0]!.race).toBe(false);
   });
 });
 
