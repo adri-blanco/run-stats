@@ -18,16 +18,30 @@ export type ActivityRow = {
 };
 
 export type Period = "3w" | "8w" | "3m" | "1y" | "all";
+export type StreakBasis = "runs" | "all";
+type Streak = { current: number; longest: number };
 
 type Bests = { best1k: number | null; best5k: number | null; best10k: number | null; longestRunM: number | null };
 
-export type CurrentLevel = Bests & { longRuns: number; weeks: number; weeksWithLongRun: number };
+export type CurrentLevel = Bests & {
+  longRuns: number;
+  weeks: number;
+  weeksWithLongRun: number;
+  weeklyDistanceM: number;
+  weeklyDistanceChangePct: number | null;
+  totalDistanceM: number;
+  timeRunningS: number;
+  runs: number;
+  runsPerWeek: number;
+  crossTrainingPerWeek: number;
+};
 
 export type DashboardData = {
   meta: { generatedAt: string; timeZone: string; newestActivity: string | null };
   activities: ActivityRow[];
   currentLevel: Record<Period, CurrentLevel>;
   allTime: Bests;
+  streaks: Record<StreakBasis, Streak>;
 };
 
 // Dates are local YYYY-MM-DD strings, both ends included.
@@ -37,6 +51,7 @@ const DAY_MS = 86_400_000;
 const LONG_RUN_M = 10_000;
 
 const isoDate = (ms: number) => new Date(ms).toISOString().slice(0, 10);
+const sum = (values: number[]) => values.reduce((total, value) => total + value, 0);
 const daysBetween = (from: string, to: string) => (Date.parse(to) - Date.parse(from)) / DAY_MS;
 
 // The day after the same date n months earlier, or after that month's last day if it is shorter.
@@ -82,6 +97,8 @@ function session(title: string): Pick<ActivityRow, "sessionType" | "sessionDetai
   return { sessionType, sessionDetail: sessionType && label };
 }
 
+type Dated = StoredActivity & { date: string };
+
 function bests(runs: StoredActivity[]): Bests {
   const lowest = (distanceM: number) => {
     const times = runs.flatMap((run) => run.bestEfforts[distanceM] ?? []);
@@ -95,15 +112,43 @@ function bests(runs: StoredActivity[]): Bests {
   };
 }
 
-function currentLevel(runs: (StoredActivity & { date: string })[], { start, end, days }: Span): CurrentLevel {
-  const inPeriod = runs.filter((run) => run.date >= start);
-  const longRuns = inPeriod.filter((run) => run.distanceM >= LONG_RUN_M);
+function currentLevel(activities: Dated[], { start, end, days }: Span): CurrentLevel {
+  const inPeriod = activities.filter((a) => a.date >= start);
+  const runs = inPeriod.filter((a) => a.type === "run");
+  const longRuns = runs.filter((run) => run.distanceM >= LONG_RUN_M);
+  const totalDistanceM = sum(runs.map((run) => run.distanceM));
+  const weeks = days / 7;
+  // "All" starts at the first activity, so nothing comes before it and its change is null too.
+  const previousStart = isoDate(Date.parse(start) - days * DAY_MS);
+  const previousM = sum(
+    activities.filter((a) => a.type === "run" && a.date >= previousStart && a.date < start).map((run) => run.distanceM),
+  );
   return {
-    ...bests(inPeriod),
+    ...bests(runs),
     longRuns: longRuns.length,
     weeks: Math.ceil(days / 7),
     weeksWithLongRun: new Set(longRuns.map((run) => Math.floor(daysBetween(run.date, end) / 7))).size,
+    weeklyDistanceM: totalDistanceM / weeks,
+    weeklyDistanceChangePct: previousM ? ((totalDistanceM - previousM) / previousM) * 100 : null,
+    totalDistanceM,
+    timeRunningS: sum(runs.map((run) => run.movingS)),
+    runs: runs.length,
+    runsPerWeek: runs.length / weeks,
+    crossTrainingPerWeek: (inPeriod.length - runs.length) / weeks,
   };
+}
+
+// Monday-to-Sunday week number. 1 January 1970 was a Thursday, so 3 days back is a Monday.
+const weekOf = (date: string) => Math.floor((Date.parse(date) / DAY_MS + 3) / 7);
+
+function streak(dates: string[], end: string): Streak {
+  const weeks = new Set(dates.map(weekOf));
+  const endingAt = (week: number) => {
+    let length = 0;
+    while (weeks.has(week - length)) length++;
+    return length;
+  };
+  return { current: endingAt(weekOf(end)), longest: Math.max(0, ...[...weeks].map(endingAt)) };
 }
 
 export function buildDashboardData(stored: StoredActivity[], settings: Settings, now: Date): DashboardData {
@@ -126,9 +171,8 @@ export function buildDashboardData(stored: StoredActivity[], settings: Settings,
     longRun: type === "run" && distanceM >= LONG_RUN_M,
     ...session(type === "run" ? title : ""),
   }));
-  const runs = stored
-    .filter((a) => a.type === "run")
-    .map((a) => ({ ...a, date: localDate.format(new Date(a.startUtc)) }));
+  const dated = stored.map((a) => ({ ...a, date: localDate.format(new Date(a.startUtc)) }));
+  const runs = dated.filter((a) => a.type === "run");
   // With nothing stored there is no newest activity, and every period is empty anyway.
   const end = activities[0]?.date ?? localDate.format(now);
   const spans = Object.entries(periodSpans(end, activities.at(-1)?.date ?? end));
@@ -139,7 +183,11 @@ export function buildDashboardData(stored: StoredActivity[], settings: Settings,
       newestActivity: activities[0]?.date ?? null,
     },
     activities,
-    currentLevel: Object.fromEntries(spans.map(([period, span]) => [period, currentLevel(runs, span)])) as Record<Period, CurrentLevel>,
+    currentLevel: Object.fromEntries(spans.map(([period, span]) => [period, currentLevel(dated, span)])) as Record<Period, CurrentLevel>,
     allTime: bests(runs),
+    streaks: {
+      runs: streak(runs.map((run) => run.date), end),
+      all: streak(dated.map((a) => a.date), end),
+    },
   };
 }
