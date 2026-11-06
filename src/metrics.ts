@@ -2,11 +2,13 @@ import type { Settings } from "./settings";
 import type { StoredActivity, TimeAtBpm } from "./store";
 
 export type ActivityRow = {
+  stravaId: string | null;
   date: string;
   title: string;
   type: string;
   distanceM: number;
   movingS: number;
+  paceSPerKm: number | null;
   avgHr: number | null;
   maxHr: number | null;
   race: boolean;
@@ -51,12 +53,14 @@ export function buildDashboardData(stored: StoredActivity[], settings: Settings,
     month: "2-digit",
     day: "2-digit",
   });
-  const activities = stored.map(({ startUtc, type, title, tags, distanceM, movingS, timeAtBpm }) => ({
+  const activities = stored.map(({ stravaId, startUtc, type, title, tags, distanceM, movingS, timeAtBpm }) => ({
+    stravaId,
     date: localDate.format(new Date(startUtc)),
     title,
     type,
     distanceM,
     movingS,
+    paceSPerKm: type === "run" && distanceM ? movingS / (distanceM / 1000) : null,
     ...heartRate(timeAtBpm),
     race: type === "run" && tags.split("|").includes("race"),
     longRun: type === "run" && distanceM >= 10_000,
