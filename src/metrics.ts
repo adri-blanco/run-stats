@@ -49,6 +49,17 @@ export type TrendBucket = {
   best10k: TrendEffort | null;
 };
 
+export type Achievement = {
+  kind: "record" | "race" | "first" | "streak";
+  date: string;
+  label: string;
+  value: number | null;
+  previous: number | null;
+  unit: "time" | "distance" | "weeks" | null;
+  activity: ActivityRow | null;
+  streakBasis?: StreakBasis;
+};
+
 export type DashboardData = {
   meta: { generatedAt: string; timeZone: string; newestActivity: string | null };
   activities: ActivityRow[];
@@ -56,6 +67,7 @@ export type DashboardData = {
   allTime: Bests & { fastest5kRace: ActivityRow | null; fastest7kRace: ActivityRow | null; fastest10kRace: ActivityRow | null };
   streaks: Record<StreakBasis, Streak>;
   trends: { month: TrendBucket[]; week: TrendBucket[] };
+  achievements: Achievement[];
 };
 
 type Run = StoredActivity & { row: ActivityRow };
@@ -66,6 +78,8 @@ type Span = { start: string; end: string; days: number };
 const DAY_MS = 86_400_000;
 const LONG_RUN_M = 10_000;
 const RECENT_ACTIVITIES = 8;
+const FIRST_WHOLE_KM = 11;
+const BEST_EFFORTS = [["1K", 1000], ["5K", 5000], ["10K", 10000]] as const;
 
 const isoDate = (ms: number) => new Date(ms).toISOString().slice(0, 10);
 const sum = (values: number[]) => values.reduce((total, value) => total + value, 0);
@@ -212,6 +226,64 @@ function streak(dates: string[], end: string): Streak {
   return { current: endingAt(weekOf(end)), longest: Math.max(0, ...[...weeks].map(endingAt)) };
 }
 
+// One row per streak, at its full length, not one per week.
+function streakRecords(dates: string[], streakBasis: StreakBasis): Achievement[] {
+  const mondays = [...new Set(dates.map(mondayOf))].sort();
+  const found: Achievement[] = [];
+  let length = 0;
+  let longest = 0;
+  mondays.forEach((monday, i) => {
+    length = mondays[i - 1] && nextWeek(mondays[i - 1]!) === monday ? length + 1 : 1;
+    if (mondays[i + 1] === nextWeek(monday) || length <= longest) return;
+    if (longest) found.push({ kind: "streak", date: monday, label: "Longest streak", value: length, previous: longest, unit: "weeks", activity: null, streakBasis });
+    longest = length;
+  });
+  return found;
+}
+
+const clock = (seconds: number) => `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+
+function achievements(runs: Run[], activities: ActivityRow[], trends: DashboardData["trends"], barriers: Settings["firstBarrierSeconds"]): Achievement[] {
+  const found: Achievement[] = [];
+  const best: Record<string, number> = {};
+  const seen = new Set<string>();
+  const first = (label: string, unit: Achievement["unit"], value: number, activity: ActivityRow) => {
+    if (seen.has(label)) return;
+    seen.add(label);
+    found.push({ kind: "first", date: activity.date, label, value, previous: null, unit, activity });
+  };
+  const record = (label: string, unit: Achievement["unit"], value: number, date: string, activity: ActivityRow | null) => {
+    const previous = best[label];
+    if (previous !== undefined && (unit === "time" ? value >= previous : value <= previous)) return;
+    best[label] = value;
+    // A previous 0 is an empty first week or month, so there was nothing to beat.
+    if (previous) found.push({ kind: "record", date, label, value, previous, unit, activity });
+  };
+  for (const { distanceM, bestEfforts, row } of runs.toReversed()) {
+    first("First run", "distance", distanceM, row);
+    if (row.race) {
+      first("First race", "distance", distanceM, row);
+      found.push({ kind: "race", date: row.date, label: row.title, value: null, previous: null, unit: null, activity: row });
+    }
+    if (row.longRun) first("First long run", "distance", distanceM, row);
+    for (let km = FIRST_WHOLE_KM; km <= distanceM / 1000; km++) first(`First ${km} km`, "distance", distanceM, row);
+    for (const [name, distance] of BEST_EFFORTS) {
+      const seconds = bestEfforts[distance];
+      if (seconds === undefined) continue;
+      record(`Best ${name}`, "time", seconds, row.date, row);
+      for (const barrier of barriers[name] ?? []) {
+        if (seconds < barrier) first(`${name} under ${clock(barrier)}`, "time", seconds, row);
+      }
+    }
+    record("Longest run", "distance", distanceM, row.date, row);
+  }
+  for (const { key, runDistanceM } of trends.week) record("Record week", "distance", runDistanceM, key, null);
+  // Every month has a 28th, so a month's record sorts after what happened in it.
+  for (const { key, runDistanceM } of trends.month) record("Record month", "distance", runDistanceM, `${key}-28`, null);
+  found.push(...streakRecords(runs.map((run) => run.row.date), "runs"), ...streakRecords(activities.map((a) => a.date), "all"));
+  return found.toSorted((a, b) => b.date.localeCompare(a.date));
+}
+
 export function buildDashboardData(stored: StoredActivity[], settings: Settings, now: Date): DashboardData {
   const localDate = new Intl.DateTimeFormat("en-CA", {
     timeZone: settings.timeZone,
@@ -238,6 +310,7 @@ export function buildDashboardData(stored: StoredActivity[], settings: Settings,
   const end = activities[0]?.date ?? localDate.format(now);
   const first = activities.at(-1)?.date ?? end;
   const spans = Object.entries(periodSpans(end, first));
+  const trends = { month: trend(runs, first, end, monthOf, nextMonth), week: trend(runs, first, end, mondayOf, nextWeek) };
   return {
     meta: {
       generatedAt: now.toISOString(),
@@ -256,6 +329,7 @@ export function buildDashboardData(stored: StoredActivity[], settings: Settings,
       runs: streak(runs.map((run) => run.row.date), end),
       all: streak(activities.map((a) => a.date), end),
     },
-    trends: { month: trend(runs, first, end, monthOf, nextMonth), week: trend(runs, first, end, mondayOf, nextWeek) },
+    trends,
+    achievements: achievements(runs, activities, trends, settings.firstBarrierSeconds),
   };
 }

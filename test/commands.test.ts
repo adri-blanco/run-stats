@@ -733,6 +733,199 @@ describe("trends", () => {
   });
 });
 
+describe("achievements", () => {
+  type Effort = Record<string, number>;
+  const on = (id: string, date: string, km: number, row: Row = {}): Row => ({ id, date: `${date}, 10:00:00`, distance: String(km * 1000), ...row });
+  // One stretch per distance, far enough apart that only the shorter stretch sets the 1K.
+  const withEfforts = (rows: [Row, Effort][]) =>
+    imported(
+      rows.map(([row]) => ({ ...row, file: `activities/${row.id}.tcx.gz` })),
+      Object.fromEntries(
+        rows.map(([row, efforts]) => {
+          let at = 0;
+          let m = 0;
+          const points: Point[] = [{ at: 0, m: 0 }];
+          for (const [distance, seconds] of Object.entries(efforts)) {
+            at += seconds;
+            m += Number(distance);
+            points.push({ at, m });
+            at += 100_000;
+            points.push({ at, m });
+          }
+          return [`activities/${row.id}.tcx.gz`, tcx(points)];
+        }),
+      ),
+    );
+  const of = (data: Awaited<ReturnType<typeof imported>>, kind: string, label?: string) =>
+    data.achievements.filter((a) => a.kind === kind && (label === undefined || a.label === label));
+  const values = (data: Awaited<ReturnType<typeof imported>>, kind: string) =>
+    of(data, kind).map(({ date, label, value, previous }) => ({ date, label, value, previous }));
+
+  describe("records", () => {
+    test("best efforts at 1K, 5K and 10K are records when beaten, and a slower run isn't", async () => {
+      const data = await withEfforts([
+        [on("3", "3 oct 2026", 12), { 1000: 280, 5000: 1500, 10000: 3200 }],
+        [on("2", "2 oct 2026", 12), { 1000: 320, 5000: 1700, 10000: 3700 }],
+        [on("1", "1 oct 2026", 12), { 1000: 300, 5000: 1600, 10000: 3500 }],
+      ]);
+      expect(of(data, "record", "Best 1K")).toMatchObject([{ date: "2026-10-03", value: 280, previous: 300, unit: "time", activity: { stravaId: "3" } }]);
+      expect(of(data, "record", "Best 5K")).toMatchObject([{ date: "2026-10-03", value: 1500, previous: 1600 }]);
+      expect(of(data, "record", "Best 10K")).toMatchObject([{ date: "2026-10-03", value: 3200, previous: 3500 }]);
+    });
+
+    test("record weeks are by run distance, dated by their Monday, with no activity", async () => {
+      const data = await imported([
+        on("5", "21 oct 2026", 12), // beats the record, in the week of the 19th
+        on("4", "15 oct 2026", 4),
+        on("3", "13 oct 2026", 4), // two runs add up to 8 km, under the 9 km baseline
+        on("2", "6 oct 2026", 9),
+        on("1", "30 sept 2026", 1, { type: "Senderismo" }), // an empty first week is no baseline
+      ]);
+      expect(of(data, "record", "Record week")).toEqual([
+        { kind: "record", date: "2026-10-19", label: "Record week", value: 12000, previous: 9000, unit: "distance", activity: null },
+      ]);
+    });
+
+    test("record months are by run distance, dated near the month's end, with no activity", async () => {
+      const data = await imported([on("3", "5 nov 2026", 7), on("2", "20 oct 2026", 8), on("1", "20 sept 2026", 6)]);
+      expect(of(data, "record", "Record month")).toEqual([
+        { kind: "record", date: "2026-10-28", label: "Record month", value: 8000, previous: 6000, unit: "distance", activity: null },
+      ]);
+    });
+
+    test("the longest run gets an entry only when beaten, with its new and old value", async () => {
+      const data = await imported([
+        on("4", "4 oct 2026", 8),
+        on("3", "3 oct 2026", 7),
+        on("2", "2 oct 2026", 6), // a tie doesn't beat the baseline
+        on("1", "1 oct 2026", 6),
+      ]);
+      expect(of(data, "record", "Longest run")).toMatchObject([
+        { date: "2026-10-04", value: 8000, previous: 7000, unit: "distance", activity: { stravaId: "4" } },
+        { date: "2026-10-03", value: 7000, previous: 6000, unit: "distance", activity: { stravaId: "3" } },
+      ]);
+    });
+
+    test("the first value of each record produces no entry", async () => {
+      const data = await imported([on("1", "1 oct 2026", 6)]);
+      expect(of(data, "record")).toEqual([]);
+    });
+  });
+
+  describe("streaks", () => {
+    test("one row per record-breaking streak, dated by its last week, and no row for the first streak", async () => {
+      const data = await imported([
+        on("7", "2 nov 2026", 5), // 3 weeks, so it breaks the record of 2
+        on("6", "26 oct 2026", 5),
+        on("5", "19 oct 2026", 5),
+        on("4", "28 sept 2026", 5), // 2 weeks, tying the record is not breaking it
+        on("3", "21 sept 2026", 5),
+        on("2", "7 sept 2026", 5), // 2 weeks, the first streak
+        on("1", "31 ago 2026", 5),
+      ]);
+      expect(of(data, "streak")).toEqual([
+        { kind: "streak", date: "2026-11-02", label: "Longest streak", value: 3, previous: 2, unit: "weeks", activity: null, streakBasis: "runs" },
+        { kind: "streak", date: "2026-11-02", label: "Longest streak", value: 3, previous: 2, unit: "weeks", activity: null, streakBasis: "all" },
+      ]);
+    });
+
+    test("rows carry their basis, as the bases break records apart", async () => {
+      const data = await imported([
+        on("4", "19 oct 2026", 1, { type: "Senderismo" }),
+        on("3", "12 oct 2026", 5),
+        on("2", "5 oct 2026", 1, { type: "Senderismo" }),
+        on("1", "21 sept 2026", 5), // one week for both bases
+      ]);
+      expect(of(data, "streak")).toMatchObject([{ date: "2026-10-19", value: 3, previous: 1, streakBasis: "all" }]);
+    });
+  });
+
+  describe("races", () => {
+    test("every race is listed, a slower one too, with its time stopped", async () => {
+      const data = await imported([
+        on("3", "3 oct 2026", 5, { title: "Slower race", tags: "race", moving: "1800", elapsed: "1860" }),
+        on("2", "2 oct 2026", 5),
+        on("1", "1 oct 2026", 5, { title: "San Silvestre", tags: "race", moving: "1500", elapsed: "1500" }),
+      ]);
+      expect(of(data, "race")).toMatchObject([
+        { date: "2026-10-03", label: "Slower race", value: null, activity: { stravaId: "3", stoppedS: 60 } },
+        { date: "2026-10-01", label: "San Silvestre", value: null, activity: { stravaId: "1", stoppedS: 0 } },
+      ]);
+    });
+  });
+
+  describe("firsts", () => {
+    test("first run, first race and first Long run happen once each", async () => {
+      const data = await imported([
+        on("4", "4 oct 2026", 10, { tags: "race" }),
+        on("3", "3 oct 2026", 10),
+        on("2", "2 oct 2026", 5, { tags: "race" }),
+        on("1", "1 oct 2026", 5),
+        on("0", "30 sept 2026", 30, { type: "Senderismo" }),
+      ]);
+      expect(values(data, "first")).toEqual([
+        { date: "2026-10-03", label: "First long run", value: 10000, previous: null },
+        { date: "2026-10-02", label: "First race", value: 5000, previous: null },
+        { date: "2026-10-01", label: "First run", value: 5000, previous: null },
+      ]);
+      expect(of(data, "first", "First race")).toMatchObject([{ unit: "distance", activity: { stravaId: "2" } }]);
+    });
+
+    test("each new whole km from 11 km up gets one entry, even when a run skips some", async () => {
+      const data = await imported([
+        on("5", "5 oct 2026", 13.2),
+        on("4", "4 oct 2026", 11.5),
+        on("3", "3 oct 2026", 11.1),
+        on("2", "2 oct 2026", 10.99),
+        on("1", "1 oct 2026", 10.5),
+      ]);
+      expect(values(data, "first").map(({ date, label }) => [date, label]).filter(([, label]) => /\d km/.test(label!))).toEqual([
+        ["2026-10-05", "First 12 km"],
+        ["2026-10-05", "First 13 km"],
+        ["2026-10-03", "First 11 km"],
+      ]);
+    });
+
+    test("the first best effort strictly under each barrier gets an entry, once", async () => {
+      const data = await withEfforts([
+        [on("4", "4 oct 2026", 6), { 5000: 1620 }], // under 27:30 again
+        [on("3", "3 oct 2026", 6), { 5000: 1640 }], // under 27:30 for the first time
+        [on("2", "2 oct 2026", 6), { 5000: 1650 }], // exactly 27:30 is not under it
+        [on("1", "1 oct 2026", 6), { 5000: 1700 }], // under 30:00 at the very first go
+      ]);
+      expect(of(data, "first").filter((a) => a.label.includes("under"))).toMatchObject([
+        { date: "2026-10-03", label: "5K under 27:30", value: 1640, unit: "time", activity: { stravaId: "3" } },
+        { date: "2026-10-01", label: "5K under 30:00", value: 1700, unit: "time", activity: { stravaId: "1" } },
+      ]);
+    });
+
+    test("barriers come from Settings, and one effort can pass several", async () => {
+      writeFileSync(join(dir, "settings.json"), JSON.stringify({ ...VALID_SETTINGS, firstBarrierSeconds: { "1K": [290, 280] } }));
+      const data = await withEfforts([[on("1", "1 oct 2026", 6), { 1000: 270 }]]);
+      expect(of(data, "first").filter((a) => a.label.includes("under")).map((a) => a.label)).toEqual(["1K under 4:50", "1K under 4:40"]);
+    });
+  });
+
+  test("come newest first, and runs alone count", async () => {
+    const data = await imported([
+      on("3", "3 oct 2026", 20),
+      on("2", "2 oct 2026", 8, { type: "Senderismo", tags: "race" }),
+      on("1", "1 oct 2026", 6),
+    ]);
+    const dates = data.achievements.map((a) => a.date);
+    expect(dates).toEqual(dates.toSorted().toReversed());
+    expect(of(data, "race")).toEqual([]);
+  });
+
+  test("activity-based entries link to their Strava activity", async () => {
+    const data = await imported([on("2", "2 oct 2026", 12, { tags: "race" }), on("1", "1 oct 2026", 6)]);
+    const noActivity = data.achievements.filter((a) => /^(Record|Longest streak)/.test(a.label));
+    expect(noActivity.every((a) => a.activity === null)).toBe(true);
+    const rest = data.achievements.filter((a) => !noActivity.includes(a));
+    expect(rest.map((a) => a.activity?.stravaId).sort()).toEqual(["1", "2", "2", "2", "2", "2", "2"]);
+  });
+});
+
 describe("a corrupt activity file", () => {
   const good = tcx([{ at: 0, bpm: 100 }, { at: 2, bpm: 100 }]);
 
