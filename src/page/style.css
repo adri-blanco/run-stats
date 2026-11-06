@@ -28,6 +28,16 @@ small{color:var(--mute)}
 .seg button{all:unset;cursor:pointer;padding:3px 10px;font-size:13px;color:#c9c5ee}
 .seg button:focus-visible{outline:2px solid #d4ff5a;outline-offset:-2px}
 .seg button.on{background:#d4ff5a;color:#1b1464}
+.content .seg{border-color:var(--line)}
+.content .seg button{color:var(--mute)}
+.content .seg button:focus-visible{outline-color:#2563a8}
+.content .seg button.on{background:var(--ink);color:#fff}
+.row{display:grid;grid-template-columns:150px minmax(0,1fr);gap:10px;align-items:center;border-bottom:1px solid var(--line);padding:4px 0}
+.row h3{margin:0;font-size:13px}
+.row small{display:block;font-size:12px;line-height:1.3;font-weight:400}
+.chartbox{position:relative;height:230px}
+.row.tall .chartbox{height:310px}
+@media (max-width:700px){.row{grid-template-columns:minmax(0,1fr)}}
 .now{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:22px 0 10px}
 .now h2{font-size:21px;font-weight:800}
 .huge{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin:6px 0 16px}
@@ -50,6 +60,10 @@ small{color:var(--mute)}
 .night .acts td{border-color:#3d3590}
 @media (max-width:1000px){.huge{grid-template-columns:repeat(3,1fr)}}
 @media (max-width:560px){.huge{grid-template-columns:1fr 1fr}.big:last-child{grid-column:span 2}}
+.contents{display:contents}
+.groups .head{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:0 8px}
+.groups .seg button{padding:1px 7px;font-size:11px}
+.lvl b{white-space:nowrap}
 .more{all:unset;display:inline-block;cursor:pointer;margin-top:10px;padding:4px 12px;border:1px solid var(--line);border-radius:7px;font-size:13px}
 .more[hidden]{display:none}
 .more:focus-visible{outline:2px solid #2563a8}
